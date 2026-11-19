@@ -76,10 +76,10 @@ on:
         required: true
     outputs:
       results:
-        description: Compact JSON object per tool with status (ok, error, skipped), findings, gated and raise
+        description: Compact JSON object per tool with status (ok, error, skipped), findings, gated, incomplete and raise
         value: ${{ jobs.security-pipeline.outputs.results }}
       verdict:
-        description: fail when at least one tool tripped the gate, otherwise pass
+        description: fail when at least one tool tripped the gate or the job failed before the gate, otherwise pass
         value: ${{ jobs.security-pipeline.outputs.verdict }}
 
 permissions:
@@ -182,7 +182,7 @@ jobs:
           exit 1
 
       - name: Upload reports
-        if: ${{ always() }}
+        if: ${{ always() && steps.logout.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.artifact-name }}
