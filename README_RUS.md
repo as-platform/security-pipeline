@@ -74,31 +74,41 @@ jobs:
 
 | Выход     | Смысл                                                                                                                  |
 | --------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `results` | компактный JSON-объект по инструментам: `{"gitleaks":{"status":"ok","findings":4,"gated":4,"raise":false},"kics":{...},...}` |
-| `verdict` | `fail`, если инструмент сработал на гейте или упала фаза до сканов, иначе `pass`                                       |
+| `results` | компактный JSON-объект по инструментам: `{"gitleaks":{"status":"ok","findings":4,"gated":4,"incomplete":0,"raise":false},"kics":{...},...}` |
+| `verdict` | `fail`, если инструмент сработал на гейте или job упал до гейта, иначе `pass`                                          |
 
 `status` — `ok`, `error` или `skipped`. Выходы читаются в следующем job через `needs.<job>.outputs.results` и `fromJSON`, см. `examples/lvl_5_blocking.yml`.
+
+`incomplete` — число: сколько частей скана инструмент не смог завершить. У checkov это сумма `summary.parsing_errors`, у kics `files_failed_to_scan + queries_failed_to_execute`, у gitleaks всегда `0`; инструмент в `error` или `skipped` отдаёт `0`. Значение больше 0 никогда не меняет `status`, `gated` и вердикт: инструмент печатает `::warning::<tool> scan incomplete: N` и остаётся `ok`, поэтому чистый результат при `incomplete > 0` означает «в прочитанном ничего не найдено». Замерено на `bridgecrewio/terragoat@729f8da62c6a85ce4af5ad3d123de97776d954c4` и на этом репозитории: `incomplete` равен 0 у всех трёх инструментов.
 
 ## Семантика гейта
 
 - Инструмент `ok`, когда сканер завершился с кодом 0 и его отчёт — валидный JSON ожидаемой формы. Ненулевой код, отсутствующий или невалидный отчёт, либо сканер, который не запускался, — это `error`, а не «0 находок». Выключенный инструмент — `skipped`.
+- Ожидаемая форма checkov — JSON, где у каждого элемента (объект для одного framework, массив для нескольких) есть `summary` с числовыми `failed` и `parsing_errors`; дерево без IaC печатает этот summary как весь объект, и это допустимо. `{}`, `[]`, элемент без summary и любая другая форма — `error`.
 - Гейт срабатывает на инструменте, когда `raise-failure` или `<tool>-raise-failure` равен `true`, а инструмент в `error` или имеет `gated > 0`.
 - По умолчанию не срабатывает ничего: job зелёный, `error` виден аннотацией `::error::`, а таблица в job summary показывает `tool | practice | status | findings | gated (threshold) | raise`.
-- Job падает независимо от переключателей, если упал `prepare`, проверка пина, `cosign verify`, pull или logout. Сбой целостности или инфраструктуры никогда не бывает мягким.
+- Job падает независимо от переключателей, если упал `prepare` (включая проверку события, см. «Заметки по безопасности»), проверка пина, `cosign verify`, pull или logout. Сбой целостности или инфраструктуры никогда не бывает мягким.
+- Вердикт `fail` и тогда, когда статус job на гейте не `success`, например упал или аварийно завершился шаг до гейта: гейт печатает `the job failed before the gate`.
 - `gated` у kics считает severity от `severity-threshold` и выше. checkov OSS не отдаёт severity, поэтому порог на него не действует и gated каждая проваленная проверка: он срабатывает по принципу «всё или ничего». При включении блокировки начни с `kics-raise-failure: true`.
 - Шаг `Quality gate` сначала пишет summary и выходы, а падает job на следующем шаге `Enforce the gate`, поэтому выходы заданы и тогда, когда гейт сработал.
 
 Каждый инструмент пишет `$RUNNER_TEMP/security-pipeline/results/<tool>.json`:
 
 ```json
-{"tool": "kics", "practice": "SAST/IAC", "status": "ok", "rc": 0, "findings": 290, "gated": 56, "report": "kics/kics.json"}
+{"tool": "kics", "practice": "SAST/IAC", "status": "ok", "rc": 0, "findings": 290, "gated": 56, "incomplete": 0, "report": "kics/kics.json"}
 ```
 
-`rc` равен `-1`, если сканер не запускался. Отсутствующий файл результата считается `error`.
+`rc` равен `-1`, если сканер не запускался. Отсутствующий файл результата или файл без числового `incomplete` считается `error`. Файл пишет шаг на хосте, вне монтирований любого контейнера.
 
 ## Отчёты
 
-Artifact `artifact-name` (хранение 7 дней, пустой набор не ошибка) содержит `gitleaks.json`, `kics/kics.json` и `checkov.json`. Значений секретов в отчётах нет: gitleaks работает с `--redact` и без `-v`, поэтому каждый `Secret` равен `REDACTED`, а значение внутри `Match` заменено на `REDACTED`; kics запускается с `--disable-secrets`, а его вывод в консоль уходит в файл, который не загружается; checkov пропускает framework `secrets`, а из его отчёта вырезаются `code_block` и `check_result.entity`, потому что checkov копирует туда атрибуты ресурсов (пароли, user data) и без framework `secrets`.
+Artifact `artifact-name` (хранение 7 дней, пустой набор не ошибка) содержит `gitleaks.json`, `kics/kics.json` и `checkov.json`. Сырой вывод сканеров не загружается никогда: шаг на хосте читает счётчики из сырого отчёта, пишет загружаемый файл через allowlist (checkov, kics) или как есть (gitleaks) и удаляет сырые файлы. Что остаётся и что убирается:
+
+- `gitleaks.json`: отчёт `gitleaks detect --redact` без `-v`, содержимое не меняется. Каждый `Secret` равен `REDACTED`, значение внутри `Match` заменено на `REDACTED`; поля со строкой исходника в отчёте нет.
+- `kics/kics.json`, остаётся: сводные счётчики (`kics_version`, `files_scanned`, `lines_scanned`, `files_parsed`, `lines_parsed`, `lines_ignored`, `files_failed_to_scan`, `queries_total`, `queries_failed_to_execute`, `queries_failed_to_compute_similarity_id`, `scan_id`, `total_counter`, `total_bom_resources`, `start`, `end`, `severity_counters`), по каждому запросу `query_name`, `query_id`, `query_url`, `severity`, `platform`, `category`, `cloud_provider` (если есть) и по каждому файлу `file_name`, `similarity_id`, `line`, `resource_type`, `resource_name`, `issue_type`. Убирается: `search_key`, `search_value`, `expected_value`, `actual_value`, `remediation`, `remediation_type`, `description` запроса и `paths` просканированных путей. kics копирует в эти поля текст исходников (инструкцию `RUN` или `ENV` целиком, ссылку на образ, значение атрибута). Поиск секретов в kics выключен (`--disable-secrets`), а его вывод в консоль уходит в файл, который удаляется и не загружается.
+- `checkov.json`, остаётся: форма вывода checkov (объект для одного framework, массив для нескольких) с, по каждому framework, `check_type`, `summary` (`passed`, `failed`, `skipped`, `parsing_errors`, `resource_count`, `checkov_version`) и `results.failed_checks`, где у каждой проваленной проверки остаются `check_id`, `check_name`, `file_path`, `file_line_range`, `resource`, `guideline`, `severity` и `check_type`. Убирается: всё остальное, в частности `code_block`, `check_result` (его `results_configuration` и `entity` содержат всю конфигурацию ресурса или job, включая `env:` и `run:` workflow и инструкцию Dockerfile), `evaluations`, `fixed_definition`, `entity_tags`, `breadcrumbs`, пройденные и пропущенные проверки, `repo_file_path`, `file_abs_path` и список ошибок разбора. Framework `secrets` у checkov пропускается (`--skip-framework secrets`). checkov OSS отдаёт `severity` как `null`.
+
+Значения секретов убираются этими allowlist, а не доверием к тому, что инструменты их спрячут: поле, которое инструмент заполняет текстом исходника, отбрасывается, как и inline-токены, которые инструменты цитируют из просканированных файлов или из метаданных правил. Оставшиеся поля всё же несут имена из проверяемого репозитория (`file_name`, `resource_name`, `resource`, `check_name`), поэтому секрет, который кто-то положил в имя файла или ресурса, остаётся виден. Artifact публичного репозитория может скачать любой залогиненный на GitHub пользователь, пока он хранится. Allowlist нужно пересмотреть при обновлении образа инструмента: поле, которое добавила новая версия, не загружается, пока allowlist его не назовёт.
 
 ## Примеры
 
@@ -108,7 +118,7 @@ Artifact `artifact-name` (хранение 7 дней, пустой набор �
 | `examples/lvl_5_blocking.yml`     | `raise-failure: true` и deploy-job, который ждёт гейт и читает `results`               |
 | `examples/scan_external_repo.yml` | ручной скан другого публичного репозитория через `repository` и `ref`                  |
 
-Примеры лежат вне `.github/workflows/`, чтобы не запускаться здесь.
+Примеры лежат вне `.github/workflows/`, чтобы не запускаться здесь. `examples/scan_external_repo.yml` сканирует репозиторий, который ты не контролируешь: сначала прочитай «Скан репозитория, который ты не контролируешь» в заметках по безопасности.
 
 ## Структура
 
@@ -124,9 +134,9 @@ Artifact `artifact-name` (хранение 7 дней, пустой набор �
 | `tools/SAST/IAC/{kics,checkov}`           | сканы kics и checkov                                              |
 | `examples`                                | вызывающие workflow по уровням зрелости                           |
 
-Шаги job идут в таком порядке: `checkout`, `prepare`, `zot-login`, `image` для каждого включённого инструмента, `logout`, сканы по очереди, `quality_gate`, загрузка отчётов, удаление контейнеров. Сканы идут с `if: !cancelled()`, поэтому упавший инструмент не скрывает остальные.
+Шаги job идут в таком порядке: `checkout`, `prepare`, `zot-login`, `image` для каждого включённого инструмента, `logout`, сканы по очереди, `quality_gate`, `Enforce the gate`, загрузка отчётов, удаление контейнеров. Сканы идут с `if: !cancelled()` и требуют успешного `logout`, поэтому упавший инструмент не скрывает остальные. Загрузка тоже требует успешного `logout` (`if: always() && steps.logout.outcome == 'success'`), поэтому сторонний action загрузки никогда не работает, пока на раннере могут оставаться креды Zot.
 
-Сканер запускается как `buildah run --user 0:0`, workspace примонтирован только на чтение (`:ro`), а `$RUNNER_TEMP/security-pipeline` примонтирован на запись для отчётов. `--user 0:0` — это root rootless user namespace, то есть непривилегированный пользователь раннера на хосте. Целиком `$RUNNER_TEMP` (там `GITHUB_ENV` и `GITHUB_PATH`), `$HOME` и authfile не монтируются. Если окажется, что инструменту нужно писать в дерево, на запись монтируется только его контейнер, и этот абзац перечислит такие случаи.
+Сканер запускается как `buildah run --user 0:0` ровно с двумя монтированиями: workspace только на чтение (`:ro`) и собственный выходной каталог `$RUNNER_TEMP/security-pipeline/out/<tool>` на запись. `$RUNNER_TEMP/security-pipeline/results` (вход гейта) и `reports` (загружаемые файлы) не монтируются никогда, поэтому сканер не может переписать ни свой результат, ни результат другого инструмента, ни отчёт. Шаг на хосте читает сырой вывод из `out/<tool>`, считает счётчики, пишет `results/<tool>.json` и очищенный отчёт в `reports/` и удаляет `out/<tool>`. checkov печатает JSON в stdout, который шаг на хосте перенаправляет в файл, невидимый ни одному контейнеру; для checkov `out/checkov` — только рабочий каталог. `--user 0:0` — это root rootless user namespace, то есть непривилегированный пользователь раннера на хосте. Целиком `$RUNNER_TEMP` (там `GITHUB_ENV` и `GITHUB_PATH`), `$HOME` и authfile не монтируются. Если окажется, что инструменту нужно писать в дерево, на запись становится доступным только его mount, и этот абзац перечислит такие случаи.
 
 ## Почему один job
 
@@ -167,20 +177,32 @@ Renovate не видит Zot, поэтому пины обновляются в�
 
 Подавления лежат в проверяемом репозитории, поэтому тот, кто может менять код, может заглушить скан. Проверяй их как код и закрой их файлы через `CODEOWNERS`:
 
-- checkov: `#checkov:skip=<id>:<причина>` у ресурса или `.checkov.yaml`
-- kics: комментарии `# kics-scan ignore-line` и `# kics-scan ignore-block`
+- checkov: `#checkov:skip=<id>:<причина>` у ресурса. `.checkov.yaml` или `.checkov.yml` проверяемого репозитория не загружается, см. «Заметки по безопасности»
+- kics: комментарии `# kics-scan ignore-line` и `# kics-scan ignore-block`. `kics.config` проверяемого репозитория не загружается, см. «Заметки по безопасности»
 - gitleaks: `.gitleaks.toml`, `.gitleaksignore` и комментарий `gitleaks:allow`
 
 ## Заметки по безопасности
 
-- Не вызывай workflow из триггеров `pull_request_target` и `workflow_run`, которые забирают код pull request: у job в первой фазе есть креды Zot, а сканеры работают по забранному дереву.
+- Workflow не работает на `pull_request_target` и `workflow_run`: `common/prepare` падает fail-closed с `::error::`, когда `GITHUB_EVENT_NAME` равен одному из них, потому что у job в первой фазе есть креды Zot, а сканируется дерево, которое может прийти из форка. Вызывай его из `push`, `pull_request` или `workflow_dispatch`.
 - Fork pull request не получают секреты, поэтому защити job условием `github.event.pull_request.head.repo.fork != true`, как в примерах.
-- Креды Zot живут только в фазе fetch. `common/logout` выполняет `buildah logout --all`, удаляет `~/.docker/config.json` и проверяет, что оба исчезли, до запуска первого сканера. Сторонние actions работают до логина или после logout.
+- Креды Zot живут только в фазе fetch. `common/logout` выполняет `buildah logout --all`, удаляет `~/.docker/config.json` и проверяет, что оба исчезли, до запуска первого сканера. Сторонние actions работают до логина или после успешного logout: загрузка отчётов не запускается, если logout упал.
 - У workflow `permissions: contents: read`, checkout не сохраняет свой токен.
+- Сканер читает только workspace и пишет только в свой `out/<tool>`; монтирования см. в разделе «Структура».
+
+### Скан репозитория, который ты не контролируешь
+
+Вход `repository` и `examples/scan_external_repo.yml` ставят перед сканерами недоверенное дерево. Что проверяемый репозиторий может настроить, найдено в образах и доказано локально с `--network none` и workspace `:ro` (checkov 3.4.5, kics 2.2.1, gitleaks 8.30.1):
+
+- checkov загружает `.checkov.yaml` и `.checkov.yml` из аргумента `--directory`, из рабочего каталога и из домашнего каталога. Конфиг может задать `external-checks-dir` и `external-checks-git`, которые импортируют Python из проверяемого репозитория: проверка репозитория, печатавшая маркер, выполнилась на старой командной строке (маркер был в выводе), а `external-checks-git` забирает код по URL из репозитория. Обезврежено: `--config-file` не помогает (файлы конфигурации по умолчанию всё равно читаются), поэтому pipeline передаёт каталог как `--directory=<path>`, а такую запись код поиска (`get_default_config_paths`) не ищет, и запускает checkov с рабочим каталогом в его собственном пустом `out/checkov`. Конфиг репозитория не загружается; тот же fixture теперь не печатает маркер и отдаёт находки встроенных проверок. `.checkov.yaml` или `.checkov.yml` в корне workspace называется в `::warning::` как игнорируемый.
+- kics загружает `kics.config` из сканируемого пути, и конфиг может заменить набор запросов (`queries-path`, `libraries-path`) на Rego из репозитория. kics запрещает `http.send` в запросе (`unsafe built-in function calls`), поэтому это способ подделать результат, а не выполнить код: репозиторий мог бы убрать все запросы и получить чистый скан. Обезврежено: kics запускается с `--config`, указывающим на пустой конфиг в `out/kics`, поэтому работают только встроенные запросы.
+- gitleaks читает `.gitleaks.toml` (и `.gitleaksignore`) из сканируемого дерева. Эти файлы могут добавить правила и allowlist, но формат не умеет ни запускать код, ни перенаправлять отчёт, а сами файлы — поддерживаемые файлы подавлений (см. «Подавления»), поэтому они учитываются.
+- Не обезврежено: inline-подавления (`#checkov:skip`, `# kics-scan ignore-line`, `gitleaks:allow`) и allowlist gitleaks, поэтому результат для такого репозитория показывает то, что его владелец оставил на виду; отсутствие сетевой изоляции (см. «Ограничения»); парсеры сканеров, читающие враждебные файлы.
+
+Доказательство зависит от версий закреплённых образов. При обновлении пина повтори его: fixture-репозиторий с `.checkov.yaml`, где `external-checks-dir` указывает на Python-проверку, печатающую маркер, не должен давать маркера, а `kics.config` со своим `queries-path` не должен менять `queries_total`.
 
 ## Как проверяется репозиторий
 
-Собственного CI у репозитория нет. Локально: `actionlint -config-file .github/actionlint.yaml` по workflow и примерам, `shellcheck -s bash` по каждому `run:` каждого action, grep-ворота на запрещённые конструкции (`${{` внутри `run:`, `ubuntu-latest`, `docker`, `container:`, Python, `secrets: inherit`, внешние actions без SHA) и `npx renovate-config-validator --strict renovate.json`. Поведение проверяет сквозной workflow в `runner-smoke`: он вызывает `security-pipeline@main` на раннере против закреплённой копии `bridgecrewio/terragoat` и против самого `runner-smoke`.
+Собственного CI у репозитория нет. Локально: `actionlint -config-file .github/actionlint.yaml` по workflow и примерам, `shellcheck -s bash` по каждому `run:` каждого action, grep-ворота на запрещённые конструкции (`${{` внутри `run:`, `ubuntu-latest`, `docker`, `container:`, Python, `secrets: inherit`, внешние actions без SHA) и `npx --yes --package renovate renovate-config-validator --strict renovate.json`. Поведение проверяет сквозной workflow в `runner-smoke`: он вызывает `security-pipeline@main` на раннере против закреплённой копии `bridgecrewio/terragoat` и против самого `runner-smoke`.
 
 ## Связанные репозитории
 
