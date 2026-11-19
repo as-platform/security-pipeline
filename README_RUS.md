@@ -102,13 +102,56 @@ jobs:
 
 ## Отчёты
 
-Artifact `artifact-name` (хранение 7 дней, пустой набор не ошибка) содержит `gitleaks.json`, `kics/kics.json` и `checkov.json`. Сырой вывод сканеров не загружается никогда: шаг на хосте читает счётчики из сырого отчёта, пишет загружаемый файл через allowlist (checkov, kics) или как есть (gitleaks) и удаляет сырые файлы. Что остаётся и что убирается:
+Artifact `artifact-name` хранится 7 дней (пустой набор не ошибка) и содержит три файла: `gitleaks.json`, `kics/kics.json` и `checkov.json`.
 
-- `gitleaks.json`: отчёт `gitleaks detect --redact` без `-v`, содержимое не меняется. Каждый `Secret` равен `REDACTED`, значение внутри `Match` заменено на `REDACTED`; поля со строкой исходника в отчёте нет.
-- `kics/kics.json`, остаётся: сводные счётчики (`kics_version`, `files_scanned`, `lines_scanned`, `files_parsed`, `lines_parsed`, `lines_ignored`, `files_failed_to_scan`, `queries_total`, `queries_failed_to_execute`, `queries_failed_to_compute_similarity_id`, `scan_id`, `total_counter`, `total_bom_resources`, `start`, `end`, `severity_counters`), по каждому запросу `query_name`, `query_id`, `query_url`, `severity`, `platform`, `category`, `cloud_provider` (если есть) и по каждому файлу `file_name`, `similarity_id`, `line`, `resource_type`, `resource_name`, `issue_type`. Убирается: `search_key`, `search_value`, `expected_value`, `actual_value`, `remediation`, `remediation_type`, `description` запроса и `paths` просканированных путей. kics копирует в эти поля текст исходников (инструкцию `RUN` или `ENV` целиком, ссылку на образ, значение атрибута). Поиск секретов в kics выключен (`--disable-secrets`), а его вывод в консоль уходит в файл, который удаляется и не загружается.
-- `checkov.json`, остаётся: форма вывода checkov (объект для одного framework, массив для нескольких) с, по каждому framework, `check_type`, `summary` (`passed`, `failed`, `skipped`, `parsing_errors`, `resource_count`, `checkov_version`) и `results.failed_checks`, где у каждой проваленной проверки остаются `check_id`, `check_name`, `file_path`, `file_line_range`, `resource`, `guideline`, `severity` и `check_type`. Убирается: всё остальное, в частности `code_block`, `check_result` (его `results_configuration` и `entity` содержат всю конфигурацию ресурса или job, включая `env:` и `run:` workflow и инструкцию Dockerfile), `evaluations`, `fixed_definition`, `entity_tags`, `breadcrumbs`, пройденные и пропущенные проверки, `repo_file_path`, `file_abs_path` и список ошибок разбора. Framework `secrets` у checkov пропускается (`--skip-framework secrets`). checkov OSS отдаёт `severity` как `null`.
+Сырой вывод сканеров не загружается никогда. Шаг на хосте читает счётчики из сырого отчёта, пишет в artifact очищенную копию и удаляет сырые файлы. Копия строится по allowlist: попадают только перечисленные поля, всё остальное отбрасывается.
 
-Значения секретов убираются этими allowlist, а не доверием к тому, что инструменты их спрячут: поле, которое инструмент заполняет текстом исходника, отбрасывается, как и inline-токены, которые инструменты цитируют из просканированных файлов или из метаданных правил. Оставшиеся поля всё же несут имена из проверяемого репозитория (`file_name`, `resource_name`, `resource`, `check_name`), поэтому секрет, который кто-то положил в имя файла или ресурса, остаётся виден. Artifact публичного репозитория может скачать любой залогиненный на GitHub пользователь, пока он хранится. Allowlist нужно пересмотреть при обновлении образа инструмента: поле, которое добавила новая версия, не загружается, пока allowlist его не назовёт.
+### `gitleaks.json`
+
+Весь отчёт `gitleaks detect --redact` без `-v`, без изменений.
+
+- Каждый `Secret` равен `REDACTED`.
+- Значение внутри `Match` заменено на `REDACTED`.
+- Поля со строкой исходника нет.
+
+### `kics/kics.json`
+
+Остаётся:
+
+- сводные счётчики: `kics_version`, `files_scanned`, `lines_scanned`, `files_parsed`, `lines_parsed`, `lines_ignored`, `files_failed_to_scan`, `queries_total`, `queries_failed_to_execute`, `queries_failed_to_compute_similarity_id`, `scan_id`, `total_counter`, `total_bom_resources`, `start`, `end`, `severity_counters`
+- по каждому запросу: `query_name`, `query_id`, `query_url`, `severity`, `platform`, `category`, `cloud_provider` (если есть)
+- по каждому файлу: `file_name`, `similarity_id`, `line`, `resource_type`, `resource_name`, `issue_type`
+
+Убирается: `search_key`, `search_value`, `expected_value`, `actual_value`, `remediation`, `remediation_type`, `description` запроса и `paths`. kics копирует в эти поля текст исходников: инструкцию `RUN` или `ENV` целиком, ссылку на образ, значение атрибута.
+
+### `checkov.json`
+
+Вывод: объект для одного framework и массив для нескольких.
+
+Остаётся:
+
+- по каждому framework: `check_type`, `summary` (`passed`, `failed`, `skipped`, `parsing_errors`, `resource_count`, `checkov_version`) и `results.failed_checks`
+- по каждой проваленной проверке: `check_id`, `check_name`, `file_path`, `file_line_range`, `resource`, `guideline`, `severity`, `check_type`
+
+Убирается: всё остальное.
+
+- `code_block`
+- `check_result`: его `results_configuration` и `entity` содержат всю конфигурацию ресурса или job, включая `env:` и `run:` workflow и инструкцию Dockerfile
+- `evaluations`, `fixed_definition`, `entity_tags`, `breadcrumbs`
+- пройденные и пропущенные проверки, `repo_file_path`, `file_abs_path`, ошибки разбора
+
+checkov OSS отдаёт `severity` как `null`.
+
+### Почему секреты не попадают в отчёты
+
+- Поиск секретов выключен в kics (`--disable-secrets`) и в checkov (`--skip-framework secrets`): секреты ищет только gitleaks. Вывод kics в консоль уходит в файл, который удаляется и не загружается.
+- Значения секретов убираются allowlist'ами, а не доверием к тому, что инструменты их спрячут. Поле, которое инструмент заполняет текстом исходника, отбрасывается, как и inline-токены, которые инструменты цитируют из просканированных файлов или из метаданных правил.
+
+### Что всё же видно
+
+- Оставшиеся поля несут имена из проверяемого репозитория (`file_name`, `resource_name`, `resource`, `check_name`). Секрет, который кто-то положил в имя файла или ресурса, остаётся виден.
+- Artifact публичного репозитория может скачать любой залогиненный на GitHub пользователь, пока он хранится.
+- Allowlist нужно пересмотреть при обновлении образа инструмента: поле, которое добавила новая версия, не загружается, пока allowlist его не назовёт.
 
 ## Примеры
 
@@ -134,9 +177,38 @@ Artifact `artifact-name` (хранение 7 дней, пустой набор �
 | `tools/SAST/IAC/{kics,checkov}`           | сканы kics и checkov                                              |
 | `examples`                                | вызывающие workflow по уровням зрелости                           |
 
-Шаги job идут в таком порядке: `checkout`, `prepare`, `zot-login`, `image` для каждого включённого инструмента, `logout`, сканы по очереди, `quality_gate`, `Enforce the gate`, загрузка отчётов, удаление контейнеров. Сканы идут с `if: !cancelled()` и требуют успешного `logout`, поэтому упавший инструмент не скрывает остальные. Загрузка тоже требует успешного `logout` (`if: always() && steps.logout.outcome == 'success'`), поэтому сторонний action загрузки никогда не работает, пока на раннере могут оставаться креды Zot.
+### Порядок шагов
 
-Сканер запускается как `buildah run --user 0:0` ровно с двумя монтированиями: workspace только на чтение (`:ro`) и собственный выходной каталог `$RUNNER_TEMP/security-pipeline/out/<tool>` на запись. `$RUNNER_TEMP/security-pipeline/results` (вход гейта) и `reports` (загружаемые файлы) не монтируются никогда, поэтому сканер не может переписать ни свой результат, ни результат другого инструмента, ни отчёт. Шаг на хосте читает сырой вывод из `out/<tool>`, считает счётчики, пишет `results/<tool>.json` и очищенный отчёт в `reports/` и удаляет `out/<tool>`. checkov печатает JSON в stdout, который шаг на хосте перенаправляет в файл, невидимый ни одному контейнеру; для checkov `out/checkov` — только рабочий каталог. `--user 0:0` — это root rootless user namespace, то есть непривилегированный пользователь раннера на хосте. Целиком `$RUNNER_TEMP` (там `GITHUB_ENV` и `GITHUB_PATH`), `$HOME` и authfile не монтируются. Если окажется, что инструменту нужно писать в дерево, на запись становится доступным только его mount, и этот абзац перечислит такие случаи.
+1. `checkout`
+2. `prepare`
+3. `zot-login`
+4. `image` для каждого включённого инструмента
+5. `logout`
+6. сканы по очереди
+7. `quality_gate`
+8. `Enforce the gate`
+9. загрузка отчётов
+10. удаление контейнеров
+
+- Сканы идут с `if: !cancelled()` и требуют успешного `logout`, поэтому упавший инструмент не скрывает остальные.
+- Загрузка тоже требует успешного `logout` (`if: always() && steps.logout.outcome == 'success'`), поэтому сторонний action загрузки никогда не работает, пока на раннере могут оставаться креды Zot.
+
+### Песочница сканера
+
+Каждый сканер запускается как `buildah run --user 0:0` ровно с двумя монтированиями:
+
+| Что монтируется                                      | Режим       |
+| ---------------------------------------------------- | ----------- |
+| workspace (checkout)                                 | на чтение   |
+| `$RUNNER_TEMP/security-pipeline/out/<tool>`          | на запись   |
+
+Не монтируются никогда: `$RUNNER_TEMP/security-pipeline/results` (вход гейта), `$RUNNER_TEMP/security-pipeline/reports` (загружаемые файлы), `$RUNNER_TEMP` целиком (там `GITHUB_ENV` и `GITHUB_PATH`), `$HOME` и authfile. Поэтому сканер не может переписать ни свой результат, ни результат другого инструмента, ни отчёт.
+
+После скана шаг на хосте читает сырой вывод из `out/<tool>`, считает счётчики, пишет `results/<tool>.json` и очищенный отчёт в `reports/` и удаляет `out/<tool>`.
+
+- checkov печатает JSON в stdout, а шаг на хосте перенаправляет его в файл, невидимый ни одному контейнеру. Для checkov `out/checkov` служит только рабочим каталогом.
+- `--user 0:0` — это root rootless user namespace, то есть непривилегированный пользователь раннера на хосте.
+- Если окажется, что инструменту нужно писать в дерево, на запись становится доступным только его mount, и этот раздел перечислит такие случаи.
 
 ## Почему один job
 
