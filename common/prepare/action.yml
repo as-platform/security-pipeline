@@ -24,6 +24,13 @@ runs:
       run: |
         set -euo pipefail
 
+        case "${GITHUB_EVENT_NAME:-}" in
+          pull_request_target|workflow_run)
+            echo "::error::the security pipeline does not run on the ${GITHUB_EVENT_NAME} event: it runs with secrets and with the context of the base repository, and the scanned tree can come from a fork. Call it from push, pull_request or workflow_dispatch"
+            exit 1
+            ;;
+        esac
+
         if [ "$ZOT_USER_SET" != true ] || [ "$ZOT_PASSWORD_SET" != true ]; then
           echo "::error::zot-user or zot-password is empty. Secrets are not passed to workflows started by fork pull requests, so the security pipeline cannot run for them: guard the caller job with github.event.pull_request.head.repo.fork != true"
           exit 1
@@ -45,6 +52,6 @@ runs:
         done
 
         sp_dir="${RUNNER_TEMP}/security-pipeline"
-        mkdir -p "${sp_dir}/reports" "${sp_dir}/results"
+        mkdir -p "${sp_dir}/reports" "${sp_dir}/results" "${sp_dir}/out"
         echo "SP_DIR=${sp_dir}" >> "$GITHUB_ENV"
         echo "working directory: ${sp_dir}"

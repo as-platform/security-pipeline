@@ -27,15 +27,15 @@ inputs:
     description: "'true' makes checkov trip the gate"
     required: true
   job-status:
-    description: job.status at the moment of the call, anything but success means a phase before the scans failed
+    description: job.status at the moment of the call, anything but success means the job failed before the gate
     required: true
 
 outputs:
   results:
-    description: Compact JSON object per tool with status, findings, gated and raise
+    description: Compact JSON object per tool with status, findings, gated, incomplete and raise
     value: ${{ steps.gate.outputs.results }}
   verdict:
-    description: fail when at least one tool tripped the gate, otherwise pass
+    description: fail when at least one tool tripped the gate or the job failed before the gate, otherwise pass
     value: ${{ steps.gate.outputs.verdict }}
 
 runs:
@@ -68,7 +68,7 @@ runs:
         verdict=pass
         if [ "$JOB_STATUS" != success ]; then
           verdict=fail
-          echo "::error::a phase before the scans failed (job status ${JOB_STATUS}), the verdict is fail"
+          echo "::error::the job failed before the gate (job status ${JOB_STATUS}), the verdict is fail"
         fi
         {
           echo "## Security pipeline"
@@ -81,6 +81,7 @@ runs:
           status=skipped
           findings=0
           gated=0
+          incomplete=0
           raise=false
           if [ "$RAISE_FAILURE" = true ] || [ "${tool_raise[$tool]}" = true ]; then
             raise=true
@@ -98,6 +99,7 @@ runs:
                 and (.rc | type == "number")
                 and (.findings | type == "number" and . >= 0)
                 and (.gated | type == "number" and . >= 0)
+                and (.incomplete | type == "number" and . >= 0)
                 and (.report | type == "string")' "$file" > /dev/null 2>&1; then
               status=error
               echo "::error::${tool}: the result file is not valid JSON of the expected shape"
@@ -105,6 +107,7 @@ runs:
               status=$(jq -r '.status' "$file")
               findings=$(jq '.findings' "$file")
               gated=$(jq '.gated' "$file")
+              incomplete=$(jq '.incomplete' "$file")
             fi
           fi
 
@@ -113,8 +116,8 @@ runs:
             echo "::error::${tool}: the gate tripped, status ${status}, gated ${gated}"
           fi
 
-          results=$(jq -c --arg tool "$tool" --arg status "$status" --argjson findings "$findings" --argjson gated "$gated" --argjson raise "$raise" \
-            '. + {($tool): {status: $status, findings: $findings, gated: $gated, raise: $raise}}' <<< "$results")
+          results=$(jq -c --arg tool "$tool" --arg status "$status" --argjson findings "$findings" --argjson gated "$gated" --argjson incomplete "$incomplete" --argjson raise "$raise" \
+            '. + {($tool): {status: $status, findings: $findings, gated: $gated, incomplete: $incomplete, raise: $raise}}' <<< "$results")
           echo "| ${tool} | ${practice[$tool]} | ${status} | ${findings} | ${gated} (${basis[$tool]}) | ${raise} |" >> "$GITHUB_STEP_SUMMARY"
         done
 
