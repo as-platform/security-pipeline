@@ -102,13 +102,56 @@ Every tool writes `$RUNNER_TEMP/security-pipeline/results/<tool>.json`:
 
 ## Reports
 
-The artifact `artifact-name` (retention 7 days, empty is not an error) holds `gitleaks.json`, `kics/kics.json` and `checkov.json`. The raw output of the scanners is never uploaded: the host step reads the counters from the raw report, writes the uploaded file through an allowlist (checkov, kics) or as is (gitleaks), and deletes the raw files. This is what stays and what goes:
+The artifact `artifact-name` is kept for 7 days (an empty one is not an error) and holds three files: `gitleaks.json`, `kics/kics.json` and `checkov.json`.
 
-- `gitleaks.json`: the report of `gitleaks detect --redact` without `-v`, kept with its content unchanged. Every `Secret` is `REDACTED` and the value inside `Match` is replaced by `REDACTED`; the report has no field with the source line.
-- `kics/kics.json`, kept: the summary counters (`kics_version`, `files_scanned`, `lines_scanned`, `files_parsed`, `lines_parsed`, `lines_ignored`, `files_failed_to_scan`, `queries_total`, `queries_failed_to_execute`, `queries_failed_to_compute_similarity_id`, `scan_id`, `total_counter`, `total_bom_resources`, `start`, `end`, `severity_counters`), per query `query_name`, `query_id`, `query_url`, `severity`, `platform`, `category`, `cloud_provider` (when present), and per file `file_name`, `similarity_id`, `line`, `resource_type`, `resource_name`, `issue_type`. Dropped: `search_key`, `search_value`, `expected_value`, `actual_value`, `remediation`, `remediation_type`, the query `description` and the scanned `paths`. kics copies source text into these fields (the whole `RUN` or `ENV` instruction, an image reference, an attribute value). Secrets scanning of kics is off (`--disable-secrets`) and its console output goes to a file that is deleted, not uploaded.
-- `checkov.json`, kept: the shape of the checkov output (an object for one framework, an array for several) with, per framework, `check_type`, `summary` (`passed`, `failed`, `skipped`, `parsing_errors`, `resource_count`, `checkov_version`) and `results.failed_checks`, where each failed check keeps `check_id`, `check_name`, `file_path`, `file_line_range`, `resource`, `guideline`, `severity` and `check_type`. Dropped: everything else, in particular `code_block`, `check_result` (its `results_configuration` and `entity` hold the whole configuration of the resource or of the job, including the `env:` and `run:` of a workflow and the instruction of a Dockerfile), `evaluations`, `fixed_definition`, `entity_tags`, `breadcrumbs`, the passed and skipped checks, `repo_file_path`, `file_abs_path` and the list of parsing errors. The `secrets` framework of checkov is skipped (`--skip-framework secrets`). checkov OSS reports `severity` as `null`.
+The raw output of the scanners is never uploaded. A host step reads the counters from the raw report, writes a sanitized copy into the artifact and deletes the raw files. The copy is built from an allowlist: only the listed fields get in, everything else is dropped.
 
-Secret values are removed by these allowlists, not by trusting the tools to hide them: a field that a tool fills with source text is dropped, and so are inline tokens that the tools quote from the scanned files or from rule metadata. The kept fields still carry names taken from the scanned repository (`file_name`, `resource_name`, `resource`, `check_name`), so a secret that someone puts into a file or resource name stays visible. The artifact of a public repository can be downloaded by any signed-in GitHub user while it is retained. Review the allowlists again when a tool image is bumped: a field that a new version adds is not uploaded until the allowlist names it.
+### `gitleaks.json`
+
+The whole report of `gitleaks detect --redact` without `-v`, unchanged.
+
+- Every `Secret` is `REDACTED`.
+- The value inside `Match` is replaced by `REDACTED`.
+- There is no field with the source line.
+
+### `kics/kics.json`
+
+Kept:
+
+- summary counters: `kics_version`, `files_scanned`, `lines_scanned`, `files_parsed`, `lines_parsed`, `lines_ignored`, `files_failed_to_scan`, `queries_total`, `queries_failed_to_execute`, `queries_failed_to_compute_similarity_id`, `scan_id`, `total_counter`, `total_bom_resources`, `start`, `end`, `severity_counters`
+- per query: `query_name`, `query_id`, `query_url`, `severity`, `platform`, `category`, `cloud_provider` (when present)
+- per file: `file_name`, `similarity_id`, `line`, `resource_type`, `resource_name`, `issue_type`
+
+Dropped: `search_key`, `search_value`, `expected_value`, `actual_value`, `remediation`, `remediation_type`, the query `description` and `paths`. kics copies source text into these fields: a whole `RUN` or `ENV` instruction, an image reference, an attribute value.
+
+### `checkov.json`
+
+The output is an object for one framework and an array for several.
+
+Kept:
+
+- per framework: `check_type`, `summary` (`passed`, `failed`, `skipped`, `parsing_errors`, `resource_count`, `checkov_version`) and `results.failed_checks`
+- per failed check: `check_id`, `check_name`, `file_path`, `file_line_range`, `resource`, `guideline`, `severity`, `check_type`
+
+Dropped: everything else.
+
+- `code_block`
+- `check_result`: its `results_configuration` and `entity` hold the whole configuration of a resource or a job, including `env:` and `run:` of a workflow and a Dockerfile instruction
+- `evaluations`, `fixed_definition`, `entity_tags`, `breadcrumbs`
+- passed and skipped checks, `repo_file_path`, `file_abs_path`, parsing errors
+
+checkov OSS reports `severity` as `null`.
+
+### Why secrets stay out
+
+- Secrets scanning is off in kics (`--disable-secrets`) and in checkov (`--skip-framework secrets`): gitleaks is the only secrets scanner. The console output of kics goes to a file that is deleted and never uploaded.
+- Secret values are removed by the allowlists, not by trusting the tools to hide them. A field that a tool fills with source text is dropped, and so are inline tokens that the tools quote from the scanned files or from rule metadata.
+
+### What can still be seen
+
+- The kept fields carry names taken from the scanned repository (`file_name`, `resource_name`, `resource`, `check_name`). A secret that someone puts into a file or resource name stays visible.
+- The artifact of a public repository can be downloaded by any signed-in GitHub user while it is retained.
+- Review the allowlists when a tool image is bumped: a field that a new version adds is not uploaded until the allowlist names it.
 
 ## Examples
 
@@ -134,9 +177,38 @@ The examples live outside `.github/workflows/` so they do not run here. `example
 | `tools/SAST/IAC/{kics,checkov}`       | kics and checkov scans                                           |
 | `examples`                            | callers by maturity level                                        |
 
-The steps of the job run in this order: `checkout`, `prepare`, `zot-login`, `image` for every enabled tool, `logout`, the scans one after another, `quality_gate`, `Enforce the gate`, upload of the reports, removal of the containers. The scans run with `if: !cancelled()` and need a successful `logout`, so one failed tool does not hide the others. The upload also needs a successful `logout` (`if: always() && steps.logout.outcome == 'success'`), so the third party upload action never runs while Zot credentials may still be on the runner.
+### Step order
 
-The scanner runs as `buildah run --user 0:0` with exactly two mounts: the workspace read-only (`:ro`) and its own output directory `$RUNNER_TEMP/security-pipeline/out/<tool>` read-write. `$RUNNER_TEMP/security-pipeline/results` (the input of the gate) and `reports` (the uploaded files) are never mounted, so a scanner cannot rewrite its own result, the result of another tool or a report. The host step reads the raw output from `out/<tool>`, computes the counters, writes `results/<tool>.json` and the sanitized report into `reports/`, and deletes `out/<tool>`. checkov prints its JSON to stdout, which the host step redirects into a file that no container sees; for checkov `out/checkov` is only the working directory. `--user 0:0` is root of the rootless user namespace, that is the unprivileged runner user on the host. `$RUNNER_TEMP` as a whole (it holds `GITHUB_ENV` and `GITHUB_PATH`), `$HOME` and the auth file are not mounted. If a tool turns out to need a writable tree, only its mount becomes read-write and this paragraph lists it.
+1. `checkout`
+2. `prepare`
+3. `zot-login`
+4. `image` for every enabled tool
+5. `logout`
+6. the scans, one after another
+7. `quality_gate`
+8. `Enforce the gate`
+9. upload of the reports
+10. removal of the containers
+
+- The scans run with `if: !cancelled()` and need a successful `logout`, so one failed tool does not hide the others.
+- The upload also needs a successful `logout` (`if: always() && steps.logout.outcome == 'success'`), so the third-party upload action never runs while Zot credentials may still be on the runner.
+
+### Scanner sandbox
+
+Each scanner runs as `buildah run --user 0:0` with exactly two mounts:
+
+| Mount                                                | Mode       |
+| ---------------------------------------------------- | ---------- |
+| the workspace (the checkout)                         | read-only  |
+| `$RUNNER_TEMP/security-pipeline/out/<tool>`          | read-write |
+
+Never mounted: `$RUNNER_TEMP/security-pipeline/results` (the input of the gate), `$RUNNER_TEMP/security-pipeline/reports` (the uploaded files), `$RUNNER_TEMP` as a whole (it holds `GITHUB_ENV` and `GITHUB_PATH`), `$HOME` and the auth file. A scanner therefore cannot rewrite its own result, the result of another tool or a report.
+
+After a scan the host step reads the raw output from `out/<tool>`, computes the counters, writes `results/<tool>.json` and the sanitized report into `reports/`, and deletes `out/<tool>`.
+
+- checkov prints its JSON to stdout, and the host step redirects it into a file that no container sees. For checkov `out/checkov` is only the working directory.
+- `--user 0:0` is root of the rootless user namespace, that is the unprivileged runner user on the host.
+- If a tool turns out to need a writable tree, only its mount becomes read-write and this section lists such cases.
 
 ## Why one job
 
