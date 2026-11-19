@@ -1,0 +1,65 @@
+name: kics
+description: Scan the workspace for IaC misconfigurations with kics in report mode and write the result for the quality gate
+
+inputs:
+  container-id:
+    description: Id of the buildah container from common/image, empty when the image phase failed
+    required: true
+  severity-threshold:
+    description: CRITICAL, HIGH, MEDIUM, LOW or INFO, findings of this severity and above are gated
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: kics
+      shell: bash
+      env:
+        CONTAINER: ${{ inputs.container-id }}
+        SEVERITY_THRESHOLD: ${{ inputs.severity-threshold }}
+      run: |
+        set -euo pipefail
+
+        case "$SEVERITY_THRESHOLD" in
+          CRITICAL|HIGH|MEDIUM|LOW|INFO) ;;
+          *)
+            echo "::error::severity-threshold must be one of CRITICAL, HIGH, MEDIUM, LOW, INFO, got ${SEVERITY_THRESHOLD@Q}"
+            exit 1
+            ;;
+        esac
+
+        sp_dir="${SP_DIR:?SP_DIR is not set, common/prepare did not run}"
+        report_dir="${sp_dir}/reports/kics"
+        report="${report_dir}/kics.json"
+        stdout="${sp_dir}/kics.stdout"
+        result="${sp_dir}/results/kics.json"
+        rm -rf "$report_dir" "$stdout" "$result"
+
+        status=error
+        rc=-1
+        findings=0
+        gated=0
+        start=$SECONDS
+        if [ -z "$CONTAINER" ]; then
+          echo "::error::kics did not run: there is no container, the image phase failed"
+        else
+          rc=0
+          buildah run --user 0:0 -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}:ro" -v "${sp_dir}:${sp_dir}" --workingdir "$GITHUB_WORKSPACE" "$CONTAINER" -- \
+            kics scan -p "$GITHUB_WORKSPACE" --ci --ignore-on-exit results --disable-secrets --exclude-type OpenAPI --report-formats json -o "$report_dir" --output-name kics.json \
+            > "$stdout" 2>&1 || rc=$?
+          if [ "$rc" -eq 0 ] && jq -e 'type == "object" and (.total_counter | type == "number")' "$report" > /dev/null 2>&1; then
+            status=ok
+            findings=$(jq '.total_counter' "$report")
+            gated=$(jq --arg threshold "$SEVERITY_THRESHOLD" '
+              {CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1, INFO: 0} as $rank
+              | [(.severity_counters // {}) | to_entries[] | select($rank[.key] != null and $rank[.key] >= $rank[$threshold]) | .value] | add // 0' "$report")
+          else
+            tail -n 20 "$stdout" || true
+            echo "::error::kics failed: exit code ${rc}, or the report is missing or has no total_counter"
+          fi
+        fi
+        elapsed=$((SECONDS - start))
+
+        jq -n --arg status "$status" --argjson rc "$rc" --argjson findings "$findings" --argjson gated "$gated" \
+          '{tool: "kics", practice: "SAST/IAC", status: $status, rc: $rc, findings: $findings, gated: $gated, report: "kics/kics.json"}' > "$result"
+        echo "kics: status=${status} rc=${rc} findings=${findings} gated=${gated} threshold=${SEVERITY_THRESHOLD} scan_seconds=${elapsed} memory_peak_bytes=$(cat /sys/fs/cgroup/memory.peak 2> /dev/null || echo n/a)"

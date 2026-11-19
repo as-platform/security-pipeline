@@ -1,0 +1,204 @@
+name: security-pipeline
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: JSON array of runs-on labels
+        type: string
+        default: '["self-hosted","homelab"]'
+      timeout-minutes:
+        description: Job timeout, keep it below the activeDeadlineSeconds of the runner
+        type: number
+        default: 30
+      repository:
+        description: owner/name of the public repository to scan, empty means the caller repository
+        type: string
+        default: ""
+      ref:
+        description: Branch, tag or SHA to scan, empty means the ref of the event
+        type: string
+        default: ""
+      artifact-name:
+        description: Name of the artifact with the scanner reports
+        type: string
+        default: security-pipeline-reports
+      severity-threshold:
+        description: CRITICAL, HIGH, MEDIUM, LOW or INFO, kics findings of this severity and above are gated
+        type: string
+        default: HIGH
+      image-gitleaks:
+        description: Pin of the gitleaks image, zot.homelab/golden/gitleaks:<YYYYMMDD-sha>@sha256:<digest>
+        type: string
+        default: zot.homelab/golden/gitleaks:20261118-0dcd8e4@sha256:4b2786189367f5bfdc65de189a1586d8060c3d7d7a315ae7fceb5c94d4a8237f
+      image-kics:
+        description: Pin of the kics image, zot.homelab/golden/kics:<YYYYMMDD-sha>@sha256:<digest>
+        type: string
+        default: zot.homelab/golden/kics:20261118-0dcd8e4@sha256:2ad5e4a1b087142af161df599d307da2ef2f18a88c0b3d501c260a8493bf68b1
+      image-checkov:
+        description: Pin of the checkov image, zot.homelab/golden/checkov:<YYYYMMDD-sha>@sha256:<digest>
+        type: string
+        default: zot.homelab/golden/checkov:20261118-0dcd8e4@sha256:75f39563ee79f00b6a583dcbf2c089020a7ee25c01af11ad606ac313a86d2933
+      disable-gitleaks:
+        description: Skip gitleaks
+        type: boolean
+        default: false
+      disable-kics:
+        description: Skip kics
+        type: boolean
+        default: false
+      disable-checkov:
+        description: Skip checkov
+        type: boolean
+        default: false
+      raise-failure:
+        description: Fail the job when any enabled tool errors or has gated findings
+        type: boolean
+        default: false
+      gitleaks-raise-failure:
+        description: Fail the job when gitleaks errors or has findings
+        type: boolean
+        default: false
+      kics-raise-failure:
+        description: Fail the job when kics errors or has gated findings
+        type: boolean
+        default: false
+      checkov-raise-failure:
+        description: Fail the job when checkov errors or has failed checks
+        type: boolean
+        default: false
+    secrets:
+      zot-user:
+        description: Zot user that can read golden/**
+        required: true
+      zot-password:
+        description: Password of the Zot user
+        required: true
+    outputs:
+      results:
+        description: Compact JSON object per tool with status (ok, error, skipped), findings, gated and raise
+        value: ${{ jobs.security-pipeline.outputs.results }}
+      verdict:
+        description: fail when at least one tool tripped the gate, otherwise pass
+        value: ${{ jobs.security-pipeline.outputs.verdict }}
+
+permissions:
+  contents: read
+
+jobs:
+  security-pipeline:
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    outputs:
+      results: ${{ steps.gate.outputs.results }}
+      verdict: ${{ steps.gate.outputs.verdict }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Prepare
+        uses: as-platform/security-pipeline/common/prepare@main
+        with:
+          zot-user-set: ${{ secrets.zot-user != '' }}
+          zot-password-set: ${{ secrets.zot-password != '' }}
+          severity-threshold: ${{ inputs.severity-threshold }}
+
+      - name: Zot login
+        uses: as-platform/ci-templates/actions/zot-login@main
+        with:
+          registry: zot.homelab
+          username: ${{ secrets.zot-user }}
+          password: ${{ secrets.zot-password }}
+
+      - name: Image gitleaks
+        id: image-gitleaks
+        if: ${{ !inputs.disable-gitleaks }}
+        uses: as-platform/security-pipeline/common/image@main
+        with:
+          image: ${{ inputs.image-gitleaks }}
+
+      - name: Image kics
+        id: image-kics
+        if: ${{ !inputs.disable-kics }}
+        uses: as-platform/security-pipeline/common/image@main
+        with:
+          image: ${{ inputs.image-kics }}
+
+      - name: Image checkov
+        id: image-checkov
+        if: ${{ !inputs.disable-checkov }}
+        uses: as-platform/security-pipeline/common/image@main
+        with:
+          image: ${{ inputs.image-checkov }}
+
+      - name: Zot logout
+        id: logout
+        if: ${{ always() }}
+        uses: as-platform/security-pipeline/common/logout@main
+
+      - name: Gitleaks
+        if: ${{ !cancelled() && !inputs.disable-gitleaks && steps.logout.outcome == 'success' }}
+        uses: as-platform/security-pipeline/tools/SAST/SECRETS/gitleaks@main
+        with:
+          container-id: ${{ steps.image-gitleaks.outputs.container-id }}
+
+      - name: Kics
+        if: ${{ !cancelled() && !inputs.disable-kics && steps.logout.outcome == 'success' }}
+        uses: as-platform/security-pipeline/tools/SAST/IAC/kics@main
+        with:
+          container-id: ${{ steps.image-kics.outputs.container-id }}
+          severity-threshold: ${{ inputs.severity-threshold }}
+
+      - name: Checkov
+        if: ${{ !cancelled() && !inputs.disable-checkov && steps.logout.outcome == 'success' }}
+        uses: as-platform/security-pipeline/tools/SAST/IAC/checkov@main
+        with:
+          container-id: ${{ steps.image-checkov.outputs.container-id }}
+
+      - name: Quality gate
+        id: gate
+        if: ${{ always() }}
+        uses: as-platform/security-pipeline/common/quality_gate@main
+        with:
+          severity-threshold: ${{ inputs.severity-threshold }}
+          disable-gitleaks: ${{ inputs.disable-gitleaks }}
+          disable-kics: ${{ inputs.disable-kics }}
+          disable-checkov: ${{ inputs.disable-checkov }}
+          raise-failure: ${{ inputs.raise-failure }}
+          gitleaks-raise-failure: ${{ inputs.gitleaks-raise-failure }}
+          kics-raise-failure: ${{ inputs.kics-raise-failure }}
+          checkov-raise-failure: ${{ inputs.checkov-raise-failure }}
+          job-status: ${{ job.status }}
+
+      - name: Enforce the gate
+        if: ${{ always() && job.status == 'success' && steps.gate.outputs.verdict == 'fail' }}
+        run: |
+          echo "::error::the security gate tripped, see the job summary"
+          exit 1
+
+      - name: Upload reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ runner.temp }}/security-pipeline/reports
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Remove the containers
+        if: ${{ always() }}
+        env:
+          CONTAINER_GITLEAKS: ${{ steps.image-gitleaks.outputs.container-id }}
+          CONTAINER_KICS: ${{ steps.image-kics.outputs.container-id }}
+          CONTAINER_CHECKOV: ${{ steps.image-checkov.outputs.container-id }}
+        run: |
+          for container in "$CONTAINER_GITLEAKS" "$CONTAINER_KICS" "$CONTAINER_CHECKOV"; do
+            if [ -n "$container" ] && ! buildah rm "$container" > /dev/null; then
+              echo "::warning::could not remove the container ${container}"
+            fi
+          done
