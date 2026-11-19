@@ -1,0 +1,50 @@
+name: prepare
+description: Check the inputs, the host tools and the Zot secrets, and create the working directories of the security pipeline
+
+inputs:
+  zot-user-set:
+    description: "'true' when the zot-user secret is not empty"
+    required: true
+  zot-password-set:
+    description: "'true' when the zot-password secret is not empty"
+    required: true
+  severity-threshold:
+    description: CRITICAL, HIGH, MEDIUM, LOW or INFO
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare
+      shell: bash
+      env:
+        ZOT_USER_SET: ${{ inputs.zot-user-set }}
+        ZOT_PASSWORD_SET: ${{ inputs.zot-password-set }}
+        SEVERITY_THRESHOLD: ${{ inputs.severity-threshold }}
+      run: |
+        set -euo pipefail
+
+        if [ "$ZOT_USER_SET" != true ] || [ "$ZOT_PASSWORD_SET" != true ]; then
+          echo "::error::zot-user or zot-password is empty. Secrets are not passed to workflows started by fork pull requests, so the security pipeline cannot run for them: guard the caller job with github.event.pull_request.head.repo.fork != true"
+          exit 1
+        fi
+
+        case "$SEVERITY_THRESHOLD" in
+          CRITICAL|HIGH|MEDIUM|LOW|INFO) ;;
+          *)
+            echo "::error::severity-threshold must be one of CRITICAL, HIGH, MEDIUM, LOW, INFO, got ${SEVERITY_THRESHOLD@Q}"
+            exit 1
+            ;;
+        esac
+
+        for tool in buildah cosign jq; do
+          if ! command -v "$tool" > /dev/null; then
+            echo "::error::${tool} is not installed on the runner"
+            exit 1
+          fi
+        done
+
+        sp_dir="${RUNNER_TEMP}/security-pipeline"
+        mkdir -p "${sp_dir}/reports" "${sp_dir}/results"
+        echo "SP_DIR=${sp_dir}" >> "$GITHUB_ENV"
+        echo "working directory: ${sp_dir}"

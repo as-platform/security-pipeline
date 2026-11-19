@@ -1,0 +1,130 @@
+name: quality_gate
+description: Read the result files of the scanners, write the summary and the outputs, and decide whether the gate trips
+
+inputs:
+  severity-threshold:
+    description: CRITICAL, HIGH, MEDIUM, LOW or INFO, shown in the summary
+    required: true
+  disable-gitleaks:
+    description: "'true' when gitleaks is disabled"
+    required: true
+  disable-kics:
+    description: "'true' when kics is disabled"
+    required: true
+  disable-checkov:
+    description: "'true' when checkov is disabled"
+    required: true
+  raise-failure:
+    description: "'true' makes every enabled tool trip the gate on an error or on gated findings"
+    required: true
+  gitleaks-raise-failure:
+    description: "'true' makes gitleaks trip the gate"
+    required: true
+  kics-raise-failure:
+    description: "'true' makes kics trip the gate"
+    required: true
+  checkov-raise-failure:
+    description: "'true' makes checkov trip the gate"
+    required: true
+  job-status:
+    description: job.status at the moment of the call, anything but success means a phase before the scans failed
+    required: true
+
+outputs:
+  results:
+    description: Compact JSON object per tool with status, findings, gated and raise
+    value: ${{ steps.gate.outputs.results }}
+  verdict:
+    description: fail when at least one tool tripped the gate, otherwise pass
+    value: ${{ steps.gate.outputs.verdict }}
+
+runs:
+  using: composite
+  steps:
+    - name: Quality gate
+      id: gate
+      shell: bash
+      env:
+        SEVERITY_THRESHOLD: ${{ inputs.severity-threshold }}
+        DISABLE_GITLEAKS: ${{ inputs.disable-gitleaks }}
+        DISABLE_KICS: ${{ inputs.disable-kics }}
+        DISABLE_CHECKOV: ${{ inputs.disable-checkov }}
+        RAISE_FAILURE: ${{ inputs.raise-failure }}
+        GITLEAKS_RAISE_FAILURE: ${{ inputs.gitleaks-raise-failure }}
+        KICS_RAISE_FAILURE: ${{ inputs.kics-raise-failure }}
+        CHECKOV_RAISE_FAILURE: ${{ inputs.checkov-raise-failure }}
+        JOB_STATUS: ${{ inputs.job-status }}
+      run: |
+        set -euo pipefail
+
+        results_dir="${SP_DIR:-}/results"
+
+        declare -A practice=([gitleaks]=SAST/SECRETS [kics]=SAST/IAC [checkov]=SAST/IAC)
+        declare -A disabled=([gitleaks]="$DISABLE_GITLEAKS" [kics]="$DISABLE_KICS" [checkov]="$DISABLE_CHECKOV")
+        declare -A tool_raise=([gitleaks]="$GITLEAKS_RAISE_FAILURE" [kics]="$KICS_RAISE_FAILURE" [checkov]="$CHECKOV_RAISE_FAILURE")
+        declare -A basis=([gitleaks]=any [kics]=">= ${SEVERITY_THRESHOLD}" [checkov]=any)
+
+        results='{}'
+        verdict=pass
+        if [ "$JOB_STATUS" != success ]; then
+          verdict=fail
+          echo "::error::a phase before the scans failed (job status ${JOB_STATUS}), the verdict is fail"
+        fi
+        {
+          echo "## Security pipeline"
+          echo
+          echo "| tool | practice | status | findings | gated (threshold) | raise |"
+          echo "| --- | --- | --- | --- | --- | --- |"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        for tool in gitleaks kics checkov; do
+          status=skipped
+          findings=0
+          gated=0
+          raise=false
+          if [ "$RAISE_FAILURE" = true ] || [ "${tool_raise[$tool]}" = true ]; then
+            raise=true
+          fi
+
+          if [ "${disabled[$tool]}" != true ]; then
+            file="${results_dir}/${tool}.json"
+            if [ ! -f "$file" ]; then
+              status=error
+              echo "::error::${tool}: the result file is missing, the scan did not finish"
+            elif ! jq -e --arg tool "$tool" '
+                type == "object"
+                and .tool == $tool
+                and (.status | IN("ok", "error"))
+                and (.rc | type == "number")
+                and (.findings | type == "number" and . >= 0)
+                and (.gated | type == "number" and . >= 0)
+                and (.report | type == "string")' "$file" > /dev/null 2>&1; then
+              status=error
+              echo "::error::${tool}: the result file is not valid JSON of the expected shape"
+            else
+              status=$(jq -r '.status' "$file")
+              findings=$(jq '.findings' "$file")
+              gated=$(jq '.gated' "$file")
+            fi
+          fi
+
+          if [ "$raise" = true ] && { [ "$status" = error ] || [ "$gated" -gt 0 ]; }; then
+            verdict=fail
+            echo "::error::${tool}: the gate tripped, status ${status}, gated ${gated}"
+          fi
+
+          results=$(jq -c --arg tool "$tool" --arg status "$status" --argjson findings "$findings" --argjson gated "$gated" --argjson raise "$raise" \
+            '. + {($tool): {status: $status, findings: $findings, gated: $gated, raise: $raise}}' <<< "$results")
+          echo "| ${tool} | ${practice[$tool]} | ${status} | ${findings} | ${gated} (${basis[$tool]}) | ${raise} |" >> "$GITHUB_STEP_SUMMARY"
+        done
+
+        {
+          echo
+          echo "Verdict: **${verdict}**"
+        } >> "$GITHUB_STEP_SUMMARY"
+        {
+          echo "results=${results}"
+          echo "verdict=${verdict}"
+        } >> "$GITHUB_OUTPUT"
+        echo "results: ${results}"
+        echo "verdict: ${verdict}"

@@ -1,0 +1,25 @@
+name: logout
+description: Remove every Zot credential from the runner before the scanners start
+
+runs:
+  using: composite
+  steps:
+    - name: Logout
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if ! buildah logout --all; then
+          echo "::warning::buildah logout --all returned a non-zero code, checking the result below"
+        fi
+        rm -f "${HOME}/.docker/config.json"
+
+        if [ -e "${HOME}/.docker/config.json" ]; then
+          echo "::error::${HOME}/.docker/config.json still exists after the logout"
+          exit 1
+        fi
+        if buildah login --get-login zot.homelab > /dev/null 2>&1; then
+          echo "::error::buildah is still logged in to zot.homelab after the logout"
+          exit 1
+        fi
+        echo "no Zot credentials left on the runner"

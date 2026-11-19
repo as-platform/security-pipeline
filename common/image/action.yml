@@ -1,0 +1,98 @@
+name: image
+description: Verify the cosign signature of a pinned scanner image by digest and create a buildah container from it
+
+inputs:
+  image:
+    description: Pin zot.homelab/golden/<tool>:<YYYYMMDD-sha>@sha256:<digest>
+    required: true
+
+outputs:
+  container-id:
+    description: Id of the buildah container created from the verified image
+    value: ${{ steps.pull.outputs.container-id }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check the pin
+      id: ref
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+      run: |
+        set -euo pipefail
+
+        pattern='^zot\.homelab/golden/(gitleaks|trivy|kics|checkov):[0-9]{8}-[0-9a-f]{7,}@sha256:[0-9a-f]{64}$'
+        if ! [[ "$IMAGE" =~ $pattern ]]; then
+          echo "::error::image pin ${IMAGE@Q} does not match zot.homelab/golden/<tool>:<YYYYMMDD-sha>@sha256:<digest>"
+          exit 1
+        fi
+
+        repo="${IMAGE%%:*}"
+        digest="${IMAGE##*@}"
+        {
+          echo "repo=${repo}"
+          echo "digest=${digest}"
+        } >> "$GITHUB_OUTPUT"
+        echo "image: ${repo}@${digest}"
+
+    - name: Verify the signature
+      shell: bash
+      env:
+        REPO: ${{ steps.ref.outputs.repo }}
+        DIGEST: ${{ steps.ref.outputs.digest }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+
+        tmp=$(mktemp -d "${RUNNER_TEMP}/image-verify.XXXXXX")
+        trap 'rm -rf "$tmp"' EXIT
+
+        ref="${REPO}@${DIGEST}"
+        if ! cosign verify --key "${ACTION_PATH}/cosign.pub" --insecure-ignore-tlog=true "$ref" > "${tmp}/verify.json" 2> "${tmp}/verify.err"; then
+          cat "${tmp}/verify.err"
+          echo "::error::cosign verify failed for ${ref}"
+          exit 1
+        fi
+        cat "${tmp}/verify.err"
+
+        if grep -q x509 "${tmp}/verify.err"; then
+          echo "::error::x509 error in the cosign output for ${ref}"
+          exit 1
+        fi
+
+        if ! jq -e --arg digest "$DIGEST" '.[0].critical.image["docker-manifest-digest"] == $digest' "${tmp}/verify.json" > /dev/null; then
+          echo "::error::the verified signature payload is not bound to ${DIGEST}"
+          exit 1
+        fi
+        echo "signature verified for ${ref}"
+
+    - name: Pull the image
+      id: pull
+      shell: bash
+      env:
+        REPO: ${{ steps.ref.outputs.repo }}
+        DIGEST: ${{ steps.ref.outputs.digest }}
+      run: |
+        set -euo pipefail
+
+        tmp=$(mktemp -d "${RUNNER_TEMP}/image-pull.XXXXXX")
+        trap 'rm -rf "$tmp"' EXIT
+
+        start=$SECONDS
+        if ! ctr=$(buildah from "docker://${REPO}@${DIGEST}" 2> "${tmp}/from.err"); then
+          cat "${tmp}/from.err"
+          echo "::error::buildah from failed for ${REPO}@${DIGEST}"
+          exit 1
+        fi
+        elapsed=$((SECONDS - start))
+        cat "${tmp}/from.err"
+
+        if grep -q x509 "${tmp}/from.err"; then
+          buildah rm "$ctr" > /dev/null || true
+          echo "::error::x509 error while pulling ${REPO}@${DIGEST}"
+          exit 1
+        fi
+
+        echo "container-id=${ctr}" >> "$GITHUB_OUTPUT"
+        echo "pulled ${REPO}@${DIGEST}, container ${ctr}, pull_seconds=${elapsed}"
