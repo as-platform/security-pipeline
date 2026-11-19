@@ -17,36 +17,60 @@ runs:
         set -euo pipefail
 
         sp_dir="${SP_DIR:?SP_DIR is not set, common/prepare did not run}"
+        out_dir="${sp_dir}/out/checkov"
         raw="${sp_dir}/checkov.raw.json"
         report="${sp_dir}/reports/checkov.json"
         stderr="${sp_dir}/checkov.stderr"
         result="${sp_dir}/results/checkov.json"
+        rm -rf "$out_dir"
         rm -f "$raw" "$report" "$stderr" "$result"
+        mkdir -p "$out_dir"
+
+        for config_file in .checkov.yaml .checkov.yml; do
+          if [ -e "${GITHUB_WORKSPACE}/${config_file}" ]; then
+            echo "::warning::checkov does not load ${config_file} from the scanned repository"
+          fi
+        done
 
         status=error
         rc=-1
         findings=0
+        incomplete=0
         start=$SECONDS
         if [ -z "$CONTAINER" ]; then
           echo "::error::checkov did not run: there is no container, the image phase failed"
         else
           rc=0
-          buildah run --user 0:0 -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}:ro" -v "${sp_dir}:${sp_dir}" --workingdir "$GITHUB_WORKSPACE" "$CONTAINER" -- \
-            checkov --skip-download --skip-framework secrets --directory "$GITHUB_WORKSPACE" --output json --soft-fail > "$raw" 2> "$stderr" || rc=$?
+          buildah run --user 0:0 -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}:ro" -v "${out_dir}:${out_dir}" --workingdir "$out_dir" "$CONTAINER" -- \
+            checkov --skip-download --skip-framework secrets --directory="$GITHUB_WORKSPACE" --output json --soft-fail > "$raw" 2> "$stderr" || rc=$?
           if [ "$rc" -eq 0 ] \
-            && jq -e 'type == "array" or type == "object"' "$raw" > /dev/null 2>&1 \
-            && jq 'del(.. | .code_block?, (.check_result? | .entity?))' "$raw" > "$report"; then
+            && jq -e '
+              (if type == "array" then . else [.] end)
+              | length > 0 and all(.[]; type == "object" and ((.summary // .) | type == "object" and (.failed | type == "number") and (.parsing_errors | type == "number")))' "$raw" > /dev/null 2>&1 \
+            && jq '
+              def pick($keys): . as $object | reduce $keys[] as $key ({}; if $object | has($key) then .[$key] = $object[$key] else . end);
+              def clean:
+                . as $framework
+                | {check_type: ($framework.check_type // null)}
+                + {summary: ((.summary // .) | pick(["passed", "failed", "skipped", "parsing_errors", "resource_count", "checkov_version"]))}
+                + {results: {failed_checks: [($framework.results.failed_checks // [])[] | pick(["check_id", "check_name", "file_path", "file_line_range", "resource", "guideline", "severity"]) + {check_type: ($framework.check_type // null)}]}};
+              if type == "array" then map(clean) else clean end' "$raw" > "$report"; then
             status=ok
-            findings=$(jq '[(if type == "array" then .[] else . end) | (.summary // .) | .failed // 0] | add // 0' "$report")
+            findings=$(jq '[(if type == "array" then .[] else . end) | (.summary // .) | .failed] | add' "$raw")
+            incomplete=$(jq '[(if type == "array" then .[] else . end) | (.summary // .) | .parsing_errors] | add' "$raw")
+            if [ "$incomplete" -gt 0 ]; then
+              echo "::warning::checkov scan incomplete: ${incomplete}"
+            fi
           else
             rm -f "$report"
             tail -n 20 "$stderr" || true
-            echo "::error::checkov failed: exit code ${rc}, or the report is missing, is not JSON or could not be sanitized"
+            echo "::error::checkov failed: exit code ${rc}, or the report is missing, has an unexpected shape or could not be sanitized"
           fi
         fi
-        rm -f "$raw"
+        rm -rf "$out_dir"
+        rm -f "$raw" "$stderr"
         elapsed=$((SECONDS - start))
 
-        jq -n --arg status "$status" --argjson rc "$rc" --argjson findings "$findings" \
-          '{tool: "checkov", practice: "SAST/IAC", status: $status, rc: $rc, findings: $findings, gated: $findings, report: "checkov.json"}' > "$result"
-        echo "checkov: status=${status} rc=${rc} findings=${findings} scan_seconds=${elapsed} memory_peak_bytes=$(cat /sys/fs/cgroup/memory.peak 2> /dev/null || echo n/a)"
+        jq -n --arg status "$status" --argjson rc "$rc" --argjson findings "$findings" --argjson incomplete "$incomplete" \
+          '{tool: "checkov", practice: "SAST/IAC", status: $status, rc: $rc, findings: $findings, gated: $findings, incomplete: $incomplete, report: "checkov.json"}' > "$result"
+        echo "checkov: status=${status} rc=${rc} findings=${findings} incomplete=${incomplete} scan_seconds=${elapsed} memory_peak_bytes=$(cat /sys/fs/cgroup/memory.peak 2> /dev/null || echo n/a)"
