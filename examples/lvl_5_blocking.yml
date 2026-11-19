@@ -1,0 +1,34 @@
+name: security-blocking
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  security:
+    if: github.event.pull_request.head.repo.fork != true
+    uses: as-platform/security-pipeline/.github/workflows/security-pipeline.yml@main
+    with:
+      raise-failure: true
+    secrets:
+      zot-user: ${{ secrets.ZOT_USER }}
+      zot-password: ${{ secrets.ZOT_PASSWORD }}
+
+  deploy:
+    if: github.event_name == 'push'
+    needs: security
+    runs-on: ["self-hosted", "homelab"]
+    steps:
+      - name: Show the gate results
+        env:
+          RESULTS: ${{ needs.security.outputs.results }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): status \(.value.status), findings \(.value.findings), gated \(.value.gated)"' <<< "$RESULTS"
+
+      - name: Deploy
+        run: echo "deploy runs only when the security gate passed"
