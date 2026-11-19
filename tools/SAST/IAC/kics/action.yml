@@ -29,37 +29,57 @@ runs:
         esac
 
         sp_dir="${SP_DIR:?SP_DIR is not set, common/prepare did not run}"
+        out_dir="${sp_dir}/out/kics"
+        config="${out_dir}/kics.config"
+        raw="${out_dir}/kics.json"
         report_dir="${sp_dir}/reports/kics"
         report="${report_dir}/kics.json"
         stdout="${sp_dir}/kics.stdout"
         result="${sp_dir}/results/kics.json"
-        rm -rf "$report_dir" "$stdout" "$result"
+        rm -rf "$out_dir" "$report_dir"
+        rm -f "$stdout" "$result"
+        mkdir -p "$out_dir"
+        echo '{}' > "$config"
 
         status=error
         rc=-1
         findings=0
         gated=0
+        incomplete=0
         start=$SECONDS
         if [ -z "$CONTAINER" ]; then
           echo "::error::kics did not run: there is no container, the image phase failed"
         else
           rc=0
-          buildah run --user 0:0 -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}:ro" -v "${sp_dir}:${sp_dir}" --workingdir "$GITHUB_WORKSPACE" "$CONTAINER" -- \
-            kics scan -p "$GITHUB_WORKSPACE" --ci --ignore-on-exit results --disable-secrets --exclude-type OpenAPI --report-formats json -o "$report_dir" --output-name kics.json \
+          buildah run --user 0:0 -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}:ro" -v "${out_dir}:${out_dir}" --workingdir "$GITHUB_WORKSPACE" "$CONTAINER" -- \
+            kics scan --config "$config" -p "$GITHUB_WORKSPACE" --ci --ignore-on-exit results --disable-secrets --exclude-type OpenAPI --report-formats json -o "$out_dir" --output-name kics.json \
             > "$stdout" 2>&1 || rc=$?
-          if [ "$rc" -eq 0 ] && jq -e 'type == "object" and (.total_counter | type == "number")' "$report" > /dev/null 2>&1; then
+          mkdir -p "$report_dir"
+          if [ "$rc" -eq 0 ] && [ -f "$raw" ] && [ ! -L "$raw" ] && jq -e 'type == "object" and (.total_counter | type == "number")' "$raw" > /dev/null 2>&1 \
+            && jq '
+              def pick($keys): . as $object | reduce $keys[] as $key ({}; if $object | has($key) then .[$key] = $object[$key] else . end);
+              pick(["kics_version", "files_scanned", "lines_scanned", "files_parsed", "lines_parsed", "lines_ignored", "files_failed_to_scan", "queries_total", "queries_failed_to_execute", "queries_failed_to_compute_similarity_id", "scan_id", "total_counter", "total_bom_resources", "start", "end", "severity_counters"])
+              + {queries: [(.queries // [])[] | pick(["query_name", "query_id", "query_url", "severity", "platform", "category", "cloud_provider"])
+                + {files: [(.files // [])[] | pick(["file_name", "similarity_id", "line", "resource_type", "resource_name", "issue_type"])]}]}' "$raw" > "$report"; then
             status=ok
-            findings=$(jq '.total_counter' "$report")
+            findings=$(jq '.total_counter' "$raw")
             gated=$(jq --arg threshold "$SEVERITY_THRESHOLD" '
               {CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1, INFO: 0} as $rank
-              | [(.severity_counters // {}) | to_entries[] | select($rank[.key] != null and $rank[.key] >= $rank[$threshold]) | .value] | add // 0' "$report")
+              | [(.severity_counters // {}) | to_entries[] | select($rank[.key] != null and $rank[.key] >= $rank[$threshold]) | .value] | add // 0' "$raw")
+            incomplete=$(jq '(.files_failed_to_scan // 0) + (.queries_failed_to_execute // 0)' "$raw")
+            if [ "$incomplete" -gt 0 ]; then
+              echo "::warning::kics scan incomplete: ${incomplete}"
+            fi
           else
+            rm -rf "$report_dir"
             tail -n 20 "$stdout" || true
-            echo "::error::kics failed: exit code ${rc}, or the report is missing or has no total_counter"
+            echo "::error::kics failed: exit code ${rc}, or the report is missing, has no total_counter or could not be sanitized"
           fi
         fi
+        rm -rf "$out_dir"
+        rm -f "$stdout"
         elapsed=$((SECONDS - start))
 
-        jq -n --arg status "$status" --argjson rc "$rc" --argjson findings "$findings" --argjson gated "$gated" \
-          '{tool: "kics", practice: "SAST/IAC", status: $status, rc: $rc, findings: $findings, gated: $gated, report: "kics/kics.json"}' > "$result"
-        echo "kics: status=${status} rc=${rc} findings=${findings} gated=${gated} threshold=${SEVERITY_THRESHOLD} scan_seconds=${elapsed} memory_peak_bytes=$(cat /sys/fs/cgroup/memory.peak 2> /dev/null || echo n/a)"
+        jq -n --arg status "$status" --argjson rc "$rc" --argjson findings "$findings" --argjson gated "$gated" --argjson incomplete "$incomplete" \
+          '{tool: "kics", practice: "SAST/IAC", status: $status, rc: $rc, findings: $findings, gated: $gated, incomplete: $incomplete, report: "kics/kics.json"}' > "$result"
+        echo "kics: status=${status} rc=${rc} findings=${findings} gated=${gated} incomplete=${incomplete} threshold=${SEVERITY_THRESHOLD} scan_seconds=${elapsed} memory_peak_bytes=$(cat /sys/fs/cgroup/memory.peak 2> /dev/null || echo n/a)"
