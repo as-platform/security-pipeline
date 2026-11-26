@@ -25,8 +25,9 @@ runs:
         set -euo pipefail
 
         case "${GITHUB_EVENT_NAME:-}" in
-          pull_request_target|workflow_run)
-            echo "::error::the security pipeline does not run on the ${GITHUB_EVENT_NAME} event: it runs with secrets and with the context of the base repository, and the scanned tree can come from a fork. Call it from push, pull_request or workflow_dispatch"
+          push|pull_request|workflow_dispatch|schedule|merge_group) ;;
+          *)
+            echo "::error::the security pipeline does not run on the ${GITHUB_EVENT_NAME:-<empty>} event: the job holds Zot credentials in its first phase and the scanned tree can come from a fork. Allowed events: push, pull_request, workflow_dispatch, schedule, merge_group"
             exit 1
             ;;
         esac
