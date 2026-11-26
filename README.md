@@ -2,24 +2,19 @@
 
 🇷🇺 [Русская версия](README_RUS.md)
 
-A reusable workflow that scans a repository for secrets and IaC misconfigurations with gitleaks, kics and checkov. The scanners run from signed images in the Zot registry of the [as-platform](https://github.com/as-platform) homelab platform, on the ephemeral runner `["self-hosted","homelab"]`, without docker: the images are verified with `cosign`, pulled with `buildah from` and started with `buildah run`.
+Reusable GitHub Actions workflow that scans a repository for secrets and IaC misconfigurations with gitleaks, kics and checkov.
 
-The scanners always run in report mode. One bash and `jq` step reads their results and decides whether the job fails, so a scan never breaks a pipeline until the caller asks for it.
+The scanners run from signed images in Zot, on the `["self-hosted","homelab"]` runner, without docker. By default they only report: the job stays green until you ask it to fail.
 
 ## What it runs
 
-| Tool       | Practice       | Mode                                                          | `gated` is                              |
-| ---------- | -------------- | ------------------------------------------------------------- | --------------------------------------- |
-| `gitleaks` | `SAST/SECRETS` | `detect --no-git --redact`, working tree only                 | every finding                           |
-| `kics`     | `SAST/IAC`     | `scan --ignore-on-exit results --disable-secrets`            | findings at or above `severity-threshold` |
-| `checkov`  | `SAST/IAC`     | `--soft-fail --skip-framework secrets --skip-download`        | every failed check                      |
+| Tool       | Finds                                         | Gate counts                               |
+| ---------- | --------------------------------------------- | ----------------------------------------- |
+| `gitleaks` | secrets in the working tree (not in history)  | every finding                             |
+| `kics`     | IaC misconfigurations                         | findings at or above `severity-threshold` |
+| `checkov`  | IaC misconfigurations                         | every failed check                        |
 
-Secrets are the job of gitleaks only: kics and checkov have their secret scanning turned off, so a found secret is never printed by three tools.
-
-### What it finds
-
-- `gitleaks`: secrets in the working tree, with the default ruleset plus the `.gitleaks.toml` and `.gitleaksignore` of the scanned repository. The git history is not scanned.
-- `kics` and `checkov`: misconfigurations of infrastructure as code, such as Kubernetes manifests, Terraform, Dockerfiles and GitHub Actions workflows, and the other formats these tools support.
+Secrets are gitleaks only: kics and checkov have secret scanning turned off.
 
 ## Quick start
 
@@ -28,6 +23,7 @@ name: security
 on:
   push: { branches: [main] }
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -41,109 +37,71 @@ jobs:
       zot-password: ${{ secrets.ZOT_PASSWORD }}
 ```
 
-The calling repository needs access to the runner (the runner group of the organization) and the secrets `ZOT_USER` and `ZOT_PASSWORD`. Pass the secrets explicitly, never with `secrets: inherit`. The workflow is referenced by `@main`, like every other template of the platform.
-
-To run it by hand only, keep `workflow_dispatch` as the single trigger:
-
-```yaml
-name: security
-on:
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-jobs:
-  security:
-    uses: as-platform/security-pipeline/.github/workflows/security-pipeline.yml@main
-    secrets:
-      zot-user: ${{ secrets.ZOT_USER }}
-      zot-password: ${{ secrets.ZOT_PASSWORD }}
-```
+The repository needs access to the runner group and the secrets `ZOT_USER` and `ZOT_PASSWORD`. Pass them explicitly, never with `secrets: inherit`. To run only by hand, keep `workflow_dispatch` as the single trigger.
 
 ## Inputs
 
-| Input                    | Default                    | Meaning                                                                                 |
-| ------------------------ | -------------------------- | --------------------------------------------------------------------------------------- |
-| `runner`                 | `["self-hosted","homelab"]` | JSON array of `runs-on` labels                                                          |
-| `timeout-minutes`        | `30`                       | job timeout, keep it below the `activeDeadlineSeconds` of the runner                     |
-| `repository`             | `""`                       | `owner/name` of a public repository to scan, empty means the caller repository          |
-| `ref`                    | `""`                       | branch, tag or SHA, empty means the ref of the event (the default branch for another repository) |
-| `artifact-name`          | `security-pipeline-reports` | name of the artifact with the reports                                                   |
-| `severity-threshold`     | `HIGH`                     | one of `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `INFO`; applies to kics only                |
-| `image-gitleaks`         | pinned, see [Image pins](docs/images.md) | image pin                                                                               |
-| `image-kics`             | pinned, see [Image pins](docs/images.md) | image pin                                                                               |
-| `image-checkov`          | pinned, see [Image pins](docs/images.md) | image pin                                                                               |
-| `disable-gitleaks`       | `false`                    | skip the tool                                                                           |
-| `disable-kics`           | `false`                    | skip the tool                                                                           |
-| `disable-checkov`        | `false`                    | skip the tool                                                                           |
-| `raise-failure`          | `false`                    | fail the job when any enabled tool errors or has gated findings                         |
-| `gitleaks-raise-failure` | `false`                    | the same for gitleaks only                                                              |
-| `kics-raise-failure`     | `false`                    | the same for kics only                                                                  |
-| `checkov-raise-failure`  | `false`                    | the same for checkov only                                                               |
+| Input                                                    | Default                      | Meaning                                                          |
+| -------------------------------------------------------- | ---------------------------- | ---------------------------------------------------------------- |
+| `runner`                                                 | `["self-hosted","homelab"]`  | JSON array of `runs-on` labels                                   |
+| `timeout-minutes`                                        | `30`                         | job timeout                                                      |
+| `repository`, `ref`                                      | the calling repository       | scan another public repository                                   |
+| `artifact-name`                                          | `security-pipeline-reports`  | name of the artifact with the reports                            |
+| `severity-threshold`                                     | `HIGH`                       | `CRITICAL`, `HIGH`, `MEDIUM`, `LOW` or `INFO`; kics only         |
+| `disable-gitleaks`, `disable-kics`, `disable-checkov`    | `false`                      | skip a tool                                                      |
+| `raise-failure`                                          | `false`                      | fail the job when a tool errors or has gated findings            |
+| `gitleaks-raise-failure`, `kics-raise-failure`, `checkov-raise-failure` | `false`        | the same for one tool                                            |
+| `image-gitleaks`, `image-kics`, `image-checkov`          | pinned                       | image pin, see [Image pins](#image-pins)                         |
 
-There are no group switches such as `disable-sast` or `disable-iac`, only per tool ones. The registry `zot.homelab` is fixed, there is no `registry` input.
+Secrets `zot-user` and `zot-password` are required: a Zot user that can read `golden/**`.
 
-## Secrets
+Outputs: `results` (JSON per tool with `status` `ok`, `error` or `skipped`, `findings`, `gated`, `incomplete`, `raise`) and `verdict` (`pass` or `fail`). Read them in a later job with `fromJSON(needs.<job>.outputs.results)`.
 
-| Secret         | Meaning                          |
-| -------------- | -------------------------------- |
-| `zot-user`     | Zot user that can read `golden/**` |
-| `zot-password` | password of that user            |
+## How the gate works
 
-Both are required. An empty value fails the `prepare` step with a message about fork pull requests: GitHub does not pass secrets to them, and the pipeline fails closed instead of skipping the scan silently.
+- A tool is `ok` when the scanner exits with 0 and its report is valid. Anything else is `error`, never "0 findings".
+- The job fails only when `raise-failure` (or the switch of that tool) is set and the tool has an `error` or gated findings.
+- A broken pin, a failed `cosign verify`, pull or logout always fails the job.
+- checkov OSS has no severity, so every failed check counts. Start blocking mode with `kics-raise-failure: true`.
+- `incomplete` is how many parts a scanner could not read. It only warns.
 
-## Outputs
+## Reports
 
-| Output    | Meaning                                                                                                              |
-| --------- | -------------------------------------------------------------------------------------------------------------------- |
-| `results` | compact JSON object per tool: `{"gitleaks":{"status":"ok","findings":4,"gated":4,"incomplete":0,"raise":false},"kics":{...},...}` |
-| `verdict` | `fail` when a tool tripped the gate or the job failed before the gate, otherwise `pass`                               |
+The artifact is kept for 7 days and has `gitleaks.json`, `kics/kics.json` and `checkov.json`. Reports are rebuilt from a list of allowed fields, so secret values and source text are dropped. File and resource names are still visible, and the artifact of a public repository can be downloaded by any signed-in GitHub user.
 
-`status` is `ok`, `error` or `skipped`. Read the outputs in a later job through `needs.<job>.outputs.results` with `fromJSON`, see `examples/lvl_5_blocking.yml`.
+## Security
 
-What `incomplete` and `gated` mean, and when the gate trips: [Gate semantics](docs/gate.md).
+- The workflow fails on `pull_request_target` and `workflow_run`. Fork pull requests get no secrets, so guard the job as in the example.
+- Zot credentials exist only while the images are pulled and are removed before the scans.
+- A scanner sees the workspace read-only and its own output directory, nothing else.
+- `.checkov.yaml` and `kics.config` of the scanned repository are ignored: they can run code or swap the queries. `.gitleaks.toml` is honoured.
+- Inline suppressions (`#checkov:skip`, `# kics-scan ignore-line`, `gitleaks:allow`) work, so review them like code.
+- Scanning a repository you do not control through `repository` is best effort: the scanners still parse its files.
 
-## Examples
+## Image pins
 
-| File                           | What it shows                                                                          |
-| ------------------------------ | -------------------------------------------------------------------------------------- |
-| `examples/lvl_2_base.yml`      | soft mode on push, pull request and manual run, with the fork guard                    |
-| `examples/lvl_5_blocking.yml`  | `raise-failure: true` and a deploy job that waits for the gate and reads `results`     |
-| `examples/scan_external_repo.yml` | manual scan of another public repository through `repository` and `ref`             |
-
-The examples live outside `.github/workflows/` so they do not run here. `examples/scan_external_repo.yml` scans a repository you do not control: read [Scanning a repository you do not control](docs/security.md#scanning-a-repository-you-do-not-control) first.
-
-## Boundary with ci-templates
-
-[`ci-templates/security.yml`](https://github.com/as-platform/ci-templates) scans the git history with gitleaks and runs `trivy fs`, hadolint and semgrep with the binaries of the runner host. This workflow runs signed images, scans the working tree only and gates on its own results. Call one of the two in a repository, not both. `trivy config` is not part of this workflow.
+The defaults are `zot.homelab/golden/<tool>:<date>-<sha>@sha256:<digest>` in `.github/workflows/security-pipeline.yml`. Each one is checked against a regular expression and verified with `common/image/cosign.pub` before the pull. Renovate cannot see Zot, so bump by hand: `skopeo inspect` for the digest, `cosign verify --key common/image/cosign.pub --insecure-ignore-tlog=true <repo>@<digest>`, then a pull request.
 
 ## Limitations
 
-- gitleaks runs with `--no-git` over a checkout of depth 1: a secret that is removed from the tree but still in the history is not found. Rotate such a secret, and scan the history with `ci-templates/security.yml` where it matters.
-- There is no network isolation. The scanners work offline only because of their flags (`--skip-download` for checkov, queries inside the kics image); the runner does not block their traffic.
-- Only public repositories can be scanned through `repository`; there is no checkout token.
-- `concurrency` is not set, the caller decides. The runner pool is small (`maxReplicaCount 3`), so a pipeline on every push takes one pod per run.
-- A sub directory of a monorepo cannot be scanned on its own, the whole checkout is scanned.
-- The Zot user in use today can also write to Zot. Connect only repositories you trust with it until a read-only user for `golden/**` exists.
+- gitleaks scans the working tree only. For the history use [`ci-templates/security.yml`](https://github.com/as-platform/ci-templates), and call one of the two workflows in a repository, not both.
+- There is no network isolation, only scanner flags keep them offline.
+- Only public repositories can be scanned through `repository`. A monorepo sub directory cannot be scanned alone.
+- The Zot user can also write to Zot: connect only repositories you trust.
 
-## Documentation
+## Examples
 
-| Document                                  | What it covers                                                                  |
-| ----------------------------------------- | ------------------------------------------------------------------------------- |
-| [`docs/gate.md`](docs/gate.md)             | `raise-failure`, `status`, `gated`, `incomplete`, the result files             |
-| [`docs/reports.md`](docs/reports.md)       | the files of the artifact and the allowlists that keep secret values out        |
-| [`docs/architecture.md`](docs/architecture.md) | layout, step order, scanner sandbox, why one job                            |
-| [`docs/images.md`](docs/images.md)         | image pins and how to bump them                                                |
-| [`docs/security.md`](docs/security.md)     | suppressions, security notes, scanning a repository you do not control         |
+- `examples/lvl_2_base.yml`: soft mode on push, pull request and manual run
+- `examples/lvl_5_blocking.yml`: `raise-failure: true` and a deploy job that waits for the gate
+- `examples/scan_external_repo.yml`: manual scan of another public repository
 
 ## Related repositories
 
-- [`ci-templates`](https://github.com/as-platform/ci-templates) — `actions/zot-login` and the workflows this pipeline sits next to
-- [`golden-images`](https://github.com/as-platform/golden-images) — builds and signs the scanner images
-- [`runner-smoke`](https://github.com/as-platform/runner-smoke) — runs the end to end checks of the pipeline on the runner
-- [`k3s`](https://github.com/as-platform/k3s) — the GitOps repository with the runner and Zot
+- [`ci-templates`](https://github.com/as-platform/ci-templates): `zot-login` and the service workflows
+- [`golden-images`](https://github.com/as-platform/golden-images): builds and signs the scanner images
+- [`runner-smoke`](https://github.com/as-platform/runner-smoke): end to end checks of this pipeline
+- [`k3s`](https://github.com/as-platform/k3s): GitOps repository with the runner and Zot
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT, see [`LICENSE`](LICENSE).
