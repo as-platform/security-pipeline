@@ -71,7 +71,7 @@ The artifact is kept for 7 days and has `gitleaks.json`, `kics/kics.json` and `c
 
 ## Security
 
-- The workflow fails on `pull_request_target` and `workflow_run`. Fork pull requests get no secrets, so guard the job as in the example.
+- The workflow runs only on `push`, `pull_request`, `workflow_dispatch`, `schedule` and `merge_group`; any other event fails it. Fork pull requests get no secrets, so guard the job as in the example.
 - Zot credentials exist only while the images are pulled and are removed before the scans.
 - A scanner sees the workspace read-only and its own output directory, nothing else.
 - `.checkov.yaml` and `kics.config` of the scanned repository are ignored: they can run code or swap the queries. `.gitleaks.toml` is honoured.
