@@ -68,6 +68,7 @@ Outputs: `results` (JSON per tool, keys `gitleaks`, `kics`, `checkov`, `trivy_fs
 - `incomplete` is how many parts a scanner could not read. It only warns.
 - `raise-failure` includes `trivy_fs` only when it is enabled. Without a lockfile `trivy_fs` is `ok` with 0 findings and a warning, so `ok` does not mean clean.
 - trivy gates a vulnerability only when it has a fix: unfixed ones are in `findings` and in the report, not in `gated`.
+- Trivy DB age in whole hours: above 72 is a warning, above 168 is `status: error`, a DB dated more than 1 hour in the future is `status: error` too.
 
 ## Reports
 
