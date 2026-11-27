@@ -14,8 +14,11 @@ inputs:
   disable-checkov:
     description: "'true' when checkov is disabled"
     required: true
+  disable-trivy-fs:
+    description: "'true' when trivy fs is disabled"
+    required: true
   raise-failure:
-    description: "'true' makes every enabled tool trip the gate on an error or on gated findings"
+    description: "'true' makes every enabled tool trip the gate on an error or on gated findings, trivy fs only when it is enabled"
     required: true
   gitleaks-raise-failure:
     description: "'true' makes gitleaks trip the gate"
@@ -25,6 +28,9 @@ inputs:
     required: true
   checkov-raise-failure:
     description: "'true' makes checkov trip the gate"
+    required: true
+  trivy-fs-raise-failure:
+    description: "'true' makes trivy fs trip the gate"
     required: true
   job-status:
     description: job.status at the moment of the call, anything but success means the job failed before the gate
@@ -49,20 +55,27 @@ runs:
         DISABLE_GITLEAKS: ${{ inputs.disable-gitleaks }}
         DISABLE_KICS: ${{ inputs.disable-kics }}
         DISABLE_CHECKOV: ${{ inputs.disable-checkov }}
+        DISABLE_TRIVY_FS: ${{ inputs.disable-trivy-fs }}
         RAISE_FAILURE: ${{ inputs.raise-failure }}
         GITLEAKS_RAISE_FAILURE: ${{ inputs.gitleaks-raise-failure }}
         KICS_RAISE_FAILURE: ${{ inputs.kics-raise-failure }}
         CHECKOV_RAISE_FAILURE: ${{ inputs.checkov-raise-failure }}
+        TRIVY_FS_RAISE_FAILURE: ${{ inputs.trivy-fs-raise-failure }}
         JOB_STATUS: ${{ inputs.job-status }}
       run: |
         set -euo pipefail
 
         results_dir="${SP_DIR:-}/results"
 
-        declare -A practice=([gitleaks]=SAST/SECRETS [kics]=SAST/IAC [checkov]=SAST/IAC)
-        declare -A disabled=([gitleaks]="$DISABLE_GITLEAKS" [kics]="$DISABLE_KICS" [checkov]="$DISABLE_CHECKOV")
-        declare -A tool_raise=([gitleaks]="$GITLEAKS_RAISE_FAILURE" [kics]="$KICS_RAISE_FAILURE" [checkov]="$CHECKOV_RAISE_FAILURE")
-        declare -A basis=([gitleaks]=any [kics]=">= ${SEVERITY_THRESHOLD}" [checkov]=any)
+        declare -A practice=([gitleaks]=SAST/SECRETS [kics]=SAST/IAC [checkov]=SAST/IAC [trivy_fs]=SCA)
+        declare -A disabled=([gitleaks]="$DISABLE_GITLEAKS" [kics]="$DISABLE_KICS" [checkov]="$DISABLE_CHECKOV" [trivy_fs]="$DISABLE_TRIVY_FS")
+        declare -A global_raise=([gitleaks]="$RAISE_FAILURE" [kics]="$RAISE_FAILURE" [checkov]="$RAISE_FAILURE" [trivy_fs]="$RAISE_FAILURE")
+        declare -A tool_raise=([gitleaks]="$GITLEAKS_RAISE_FAILURE" [kics]="$KICS_RAISE_FAILURE" [checkov]="$CHECKOV_RAISE_FAILURE" [trivy_fs]="$TRIVY_FS_RAISE_FAILURE")
+        declare -A basis=([gitleaks]=any [kics]=">= ${SEVERITY_THRESHOLD}" [checkov]=any [trivy_fs]=">= ${SEVERITY_THRESHOLD}")
+
+        if [ "$DISABLE_TRIVY_FS" = true ]; then
+          global_raise[trivy_fs]=false
+        fi
 
         results='{}'
         verdict=pass
@@ -77,13 +90,13 @@ runs:
           echo "| --- | --- | --- | --- | --- | --- |"
         } >> "$GITHUB_STEP_SUMMARY"
 
-        for tool in gitleaks kics checkov; do
+        for tool in gitleaks kics checkov trivy_fs; do
           status=skipped
           findings=0
           gated=0
           incomplete=0
           raise=false
-          if [ "$RAISE_FAILURE" = true ] || [ "${tool_raise[$tool]}" = true ]; then
+          if [ "${global_raise[$tool]}" = true ] || [ "${tool_raise[$tool]}" = true ]; then
             raise=true
           fi
 
