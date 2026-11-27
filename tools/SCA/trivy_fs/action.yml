@@ -1,0 +1,159 @@
+name: trivy_fs
+description: Scan the workspace lockfiles for known vulnerabilities with trivy fs in report mode, offline, and write the result for the quality gate
+
+inputs:
+  container-id:
+    description: Id of the buildah container from common/image, empty when the image phase failed
+    required: true
+  db-dir:
+    description: Trivy cache directory with the vulnerability DB from common/trivy_db, empty when there is no DB
+    required: true
+  db-source:
+    description: zot or public, only for the log and the result file, empty when there is no DB
+    required: true
+  severity-threshold:
+    description: CRITICAL, HIGH, MEDIUM, LOW or INFO, fixable vulnerabilities of this severity and above are gated
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: trivy_fs
+      shell: bash
+      env:
+        CONTAINER: ${{ inputs.container-id }}
+        DB_DIR: ${{ inputs.db-dir }}
+        DB_SOURCE: ${{ inputs.db-source }}
+        SEVERITY_THRESHOLD: ${{ inputs.severity-threshold }}
+      run: |
+        set -euo pipefail
+
+        case "$SEVERITY_THRESHOLD" in
+          CRITICAL|HIGH|MEDIUM|LOW|INFO) ;;
+          *)
+            echo "::error::severity-threshold must be one of CRITICAL, HIGH, MEDIUM, LOW, INFO, got ${SEVERITY_THRESHOLD@Q}"
+            exit 1
+            ;;
+        esac
+
+        sp_dir="${SP_DIR:?SP_DIR is not set, common/prepare did not run}"
+        out_dir="${sp_dir}/out/trivy_fs"
+        canary_dir="${sp_dir}/canary"
+        config="${out_dir}/trivy.config"
+        raw="${out_dir}/trivy_fs.json"
+        canary_raw="${out_dir}/canary.json"
+        debug_log="${sp_dir}/trivy_fs.debug"
+        report="${sp_dir}/reports/trivy_fs.json"
+        result="${sp_dir}/results/trivy_fs.json"
+        rm -rf "$out_dir" "$canary_dir"
+        rm -f "$debug_log" "$report" "$result"
+        mkdir -p "$out_dir" "$canary_dir"
+        : > "$config"
+
+        if [ -e "${GITHUB_WORKSPACE}/trivy.yaml" ]; then
+          echo "::warning::trivy does not load trivy.yaml from the scanned repository"
+        fi
+
+        ignorefile=""
+        tree_ignore="${GITHUB_WORKSPACE}/.trivyignore"
+        if [ -f "$tree_ignore" ] && [ ! -L "$tree_ignore" ]; then
+          ignorefile="$tree_ignore"
+          echo ".trivyignore of the scanned repository is honoured, it hides:"
+          grep -v '^[[:space:]]*$' "$tree_ignore" | head -n 100 | cut -c1-200 | sed 's/^/  trivyignore: /' || true
+        elif [ -e "$tree_ignore" ] || [ -L "$tree_ignore" ]; then
+          echo "::warning::.trivyignore of the scanned repository is not a regular file and is ignored"
+        fi
+
+        scan() {
+          buildah run --network none --user 0:0 \
+            -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}:ro" -v "${out_dir}:${out_dir}" -v "${DB_DIR}:${DB_DIR}:ro" -v "${canary_dir}:${canary_dir}:ro" \
+            --workingdir "$out_dir" "$CONTAINER" -- \
+            trivy fs --config "$config" --cache-dir "$DB_DIR" --skip-db-update --skip-check-update --skip-version-check --offline-scan --disable-telemetry \
+            --scanners vuln --debug --format json --output "$2" --exit-code 0 --ignorefile "$3" "$1"
+        }
+        show_fatal() {
+          grep -aE '[[:space:]]FATAL[[:space:]]' "$debug_log" | tail -n 5 | cut -c1-300 | sed 's/^/  trivy: /' || true
+        }
+
+        status=error
+        rc=-1
+        findings=0
+        gated=0
+        targets=0
+        incomplete=0
+        db_source="${DB_SOURCE:-none}"
+        precheck=""
+        if [ -z "$CONTAINER" ]; then
+          precheck="there is no container, the image phase failed"
+        elif [ -z "$DB_DIR" ] || [ ! -s "${DB_DIR}/db/trivy.db" ]; then
+          precheck="there is no usable Trivy DB"
+          db_source=none
+        else
+          age_hours=$(jq -r --argjson now "$(date +%s)" '
+            ((.UpdatedAt // "") | sub("\\.[0-9]+Z$"; "Z") | try fromdateiso8601 catch null) as $updated
+            | if $updated == null then "unknown" else (($now - $updated) / 3600 | floor | tostring) end' "${DB_DIR}/db/metadata.json" 2> /dev/null) || age_hours=unknown
+          if [ "$age_hours" = unknown ]; then
+            precheck="cannot read UpdatedAt from the Trivy DB metadata"
+          elif [ "$age_hours" -gt 168 ]; then
+            precheck="the Trivy DB is ${age_hours} hours old, the limit is 168"
+          elif [ "$age_hours" -gt 72 ]; then
+            echo "::warning::the Trivy DB is ${age_hours} hours old"
+          fi
+        fi
+
+        start=$SECONDS
+        if [ -n "$precheck" ]; then
+          echo "::error::trivy_fs did not run: ${precheck}"
+        else
+          image_version=$(buildah run --user 0:0 "$CONTAINER" -- trivy --version 2> /dev/null | head -n 1) || image_version=unknown
+          echo "trivy image: ${image_version:-unknown}"
+
+          printf '%s\n' '{"name":"canary","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"canary","version":"1.0.0","dependencies":{"lodash":"4.17.15"}},"node_modules/lodash":{"version":"4.17.15"}}}' > "${canary_dir}/package-lock.json"
+          canary_rc=0
+          scan "$canary_dir" "$canary_raw" "" 2> "$debug_log" || canary_rc=$?
+          canary_high=$(jq '[(.Results // [])[] | (.Vulnerabilities // [])[] | select(.Severity == "HIGH" or .Severity == "CRITICAL")] | length' "$canary_raw" 2> /dev/null) || canary_high=0
+          if [ "$canary_rc" -ne 0 ] || [ "$canary_high" -lt 1 ]; then
+            show_fatal
+            echo "::error::trivy_fs canary failed: exit code ${canary_rc}, ${canary_high} HIGH vulnerabilities in the canary lockfile, expected at least 1. The DB is empty, poisoned or has another schema, or trivy did not run"
+          else
+            rc=0
+            scan "$GITHUB_WORKSPACE" "$raw" "$ignorefile" 2> "$debug_log" || rc=$?
+            if [ "$rc" -eq 0 ] && [ -f "$raw" ] && [ ! -L "$raw" ] \
+              && jq -e 'type == "object" and (.SchemaVersion | type == "number") and (.Results | . == null or type == "array")' "$raw" > /dev/null 2>&1 \
+              && jq '
+                def pick($keys): . as $object | reduce $keys[] as $key ({}; if $object | has($key) then .[$key] = $object[$key] else . end);
+                pick(["SchemaVersion", "ArtifactType"])
+                + {Results: [(.Results // [])[] | pick(["Target", "Class", "Type"])
+                  + {Vulnerabilities: [(.Vulnerabilities // [])[] | pick(["VulnerabilityID", "PkgName", "PkgPath", "InstalledVersion", "FixedVersion", "Status", "Severity", "Title", "PrimaryURL"])]}]}' "$raw" > "$report"; then
+              status=ok
+              findings=$(jq '[.Results[].Vulnerabilities[]] | length' "$report")
+              gated=$(jq --arg threshold "$SEVERITY_THRESHOLD" '
+                {CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1, INFO: 0, UNKNOWN: 0} as $rank
+                | [.Results[].Vulnerabilities[] | select(($rank[.Severity] // 0) >= $rank[$threshold] and (.FixedVersion // "") != "")] | length' "$report")
+              targets=$(jq '.Results | length' "$report")
+              walk_lines=$(grep -caE 'Walk error|[[:space:]]WARN[[:space:]]' "$debug_log" || true)
+              archives=$(find "$GITHUB_WORKSPACE" -path "${GITHUB_WORKSPACE}/.git" -prune -o -type f \( -name '*.jar' -o -name '*.war' -o -name '*.ear' -o -name '*.par' \) -print | wc -l | tr -d '[:space:]')
+              incomplete=$((walk_lines + archives))
+              if [ "$walk_lines" -gt 0 ]; then
+                grep -aE 'Walk error|[[:space:]]WARN[[:space:]]' "$debug_log" | head -n 50 | cut -c1-300 | sed 's/^/  trivy: /' || true
+              fi
+              if [ "$incomplete" -gt 0 ]; then
+                echo "::warning::trivy_fs scan incomplete: ${incomplete} (Walk error and WARN lines ${walk_lines}, JAR, WAR, EAR and PAR files ${archives}, trivy fs does not read them)"
+              fi
+              if [ "$targets" -eq 0 ]; then
+                echo "::warning::trivy_fs found no lockfile in the tree, ok does not mean clean"
+              fi
+            else
+              rm -f "$report"
+              show_fatal
+              echo "::error::trivy_fs failed: exit code ${rc}, or the report is missing, has an unexpected shape or could not be sanitized"
+            fi
+          fi
+        fi
+        rm -rf "$out_dir" "$canary_dir"
+        rm -f "$debug_log"
+        elapsed=$((SECONDS - start))
+
+        jq -n --arg status "$status" --argjson rc "$rc" --argjson findings "$findings" --argjson gated "$gated" --argjson incomplete "$incomplete" --argjson targets "$targets" --arg db_source "$db_source" \
+          '{tool: "trivy_fs", practice: "SCA", status: $status, rc: $rc, findings: $findings, gated: $gated, incomplete: $incomplete, targets: $targets, db_source: $db_source, report: "trivy_fs.json"}' > "$result"
+        echo "trivy_fs: status=${status} rc=${rc} findings=${findings} gated=${gated} targets=${targets} incomplete=${incomplete} db_source=${db_source} threshold=${SEVERITY_THRESHOLD} scan_seconds=${elapsed} memory_peak_bytes=$(cat /sys/fs/cgroup/memory.peak 2> /dev/null || echo n/a)"
