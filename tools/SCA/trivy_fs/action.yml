@@ -95,7 +95,7 @@ runs:
           if [ "$age_hours" = unknown ]; then
             precheck="cannot read UpdatedAt from the Trivy DB metadata"
           elif [ "$age_hours" -lt -1 ]; then
-            precheck="the Trivy DB is dated ${age_hours#-} hours in the future, the limit is 1"
+            precheck="the Trivy DB is dated more than 1 hour in the future"
           elif [ "$age_hours" -gt 168 ]; then
             precheck="the Trivy DB is ${age_hours} hours old, the limit is 168"
           elif [ "$age_hours" -gt 72 ]; then
