@@ -68,7 +68,7 @@ Outputs: `results` (JSON per tool, keys `gitleaks`, `kics`, `checkov`, `trivy_fs
 - `incomplete` is how many parts a scanner could not read. It only warns.
 - `raise-failure` includes `trivy_fs` only when it is enabled. Without a lockfile `trivy_fs` is `ok` with 0 findings and a warning, so `ok` does not mean clean.
 - trivy gates a vulnerability only when it has a fix: unfixed ones are in `findings` and in the report, not in `gated`.
-- Trivy DB age in whole hours: above 72 is a warning, above 168 is `status: error`, a DB dated more than 1 hour in the future is `status: error` too.
+- Trivy DB age in whole hours: above 72 is a warning, above 168 is `status: error` with no fallback to the public registry, a DB dated more than 1 hour in the future is `status: error` too.
 
 ## Reports
 
@@ -77,11 +77,11 @@ The artifact is kept for 7 days and has `gitleaks.json`, `kics/kics.json`, `chec
 ## Security
 
 - The workflow runs only on `push`, `pull_request`, `workflow_dispatch`, `schedule` and `merge_group`; any other event fails it. Fork pull requests get no secrets, so guard the job as in the example.
-- Zot credentials exist only while the images are pulled and are removed before the scans.
+- Zot credentials exist only while the images are pulled and the host `trivy` downloads the DB, and are removed before the scans.
 - A scanner sees the workspace read-only and its own output directory, nothing else.
 - `.checkov.yaml` and `kics.config` of the scanned repository are ignored: they can run code or swap the queries. `.gitleaks.toml` is honoured.
 - Inline suppressions (`#checkov:skip`, `# kics-scan ignore-line`, `gitleaks:allow`) work, so review them like code.
-- `trivy fs` scans offline: the DB is downloaded on the host before the logout from the Zot mirror, or from the public registry when the mirror fails. The DB signature is not checked. `trivy.yaml` of the scanned repository is ignored, its `.trivyignore` is honoured and hides findings silently, so put it under CODEOWNERS.
+- `trivy fs` scans offline: the DB (about 1.8 GB unpacked) is downloaded by `trivy` on the runner host, which must have it installed, before the logout from the Zot mirror, or from the public registry only when the mirror download fails or its DB is unusable. The DB signature is not checked. `trivy.yaml` of the scanned repository is ignored, its `.trivyignore` is honoured and hides findings silently, so put it under CODEOWNERS.
 - Scanning a repository you do not control through `repository` is best effort: the scanners still parse its files.
 
 ## Image pins
@@ -91,7 +91,7 @@ The defaults are `zot.homelab/golden/<tool>:<date>-<sha>@sha256:<digest>` in `.g
 ## Limitations
 
 - gitleaks scans the working tree only. For the history use [`ci-templates/security.yml`](https://github.com/as-platform/ci-templates), and call one of the two workflows in a repository, not both.
-- There is no network isolation, only scanner flags keep them offline: `trivy fs` runs with `--offline-scan` and `--skip-db-update` and reads the DB from disk. `--network none` is passed, but on the runner the container still sees the network namespace of the pod and `eth0`, so it is not an isolation.
+- There is no network isolation, only scanner flags keep them offline: `trivy fs` runs with `--offline-scan` and `--skip-db-update` and reads the DB from disk. `--network none` is passed, but on the runner it does not create a separate network namespace: the container still sees the network of the pod and `eth0`, so only the flags keep the scan offline, and this is not verified at runtime.
 - `trivy fs` does not read JAR, WAR and EAR files and reads `pom.xml` without its parent and BOM, so those parts count as `incomplete`.
 - `ci-templates/security.yml` also runs `trivy fs` (vulnerabilities, secrets, misconfigurations): call one of the two workflows, not both.
 - Only public repositories can be scanned through `repository`. A monorepo sub directory cannot be scanned alone.
