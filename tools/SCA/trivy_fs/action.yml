@@ -69,7 +69,7 @@ runs:
             -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}:ro" -v "${out_dir}:${out_dir}" -v "${DB_DIR}:${DB_DIR}:ro" -v "${canary_dir}:${canary_dir}:ro" \
             --workingdir "$out_dir" "$CONTAINER" -- \
             trivy fs --config "$config" --cache-dir "$DB_DIR" --skip-db-update --skip-check-update --skip-version-check --offline-scan --disable-telemetry \
-            --scanners vuln --debug --format json --output "$2" --exit-code 0 --ignorefile "$3" "$1"
+            --scanners vuln --debug --format json --output "$2" --exit-code 0 --ignorefile "$3" "$1" > /dev/null
         }
         show_fatal() {
           grep -aE '[[:space:]]FATAL[[:space:]]' "$debug_log" | tail -n 5 | cut -c1-300 | sed 's/^/  trivy: /' || true
@@ -131,10 +131,10 @@ runs:
               findings=$(jq '[.Results[].Vulnerabilities[]] | length' "$report")
               gated=$(jq --arg threshold "$SEVERITY_THRESHOLD" '
                 {CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1, INFO: 0, UNKNOWN: 0} as $rank
-                | [.Results[].Vulnerabilities[] | select(($rank[.Severity] // 0) >= $rank[$threshold] and (.FixedVersion // "") != "")] | length' "$report")
+                | [.Results[].Vulnerabilities[] | select(($rank[.Severity // "UNKNOWN"] // 0) >= $rank[$threshold] and (.FixedVersion // "") != "")] | length' "$report")
               targets=$(jq '.Results | length' "$report")
               walk_lines=$(grep -caE 'Walk error|[[:space:]]WARN[[:space:]]' "$debug_log" || true)
-              archives=$(find "$GITHUB_WORKSPACE" -path "${GITHUB_WORKSPACE}/.git" -prune -o -type f \( -name '*.jar' -o -name '*.war' -o -name '*.ear' -o -name '*.par' \) -print | wc -l | tr -d '[:space:]')
+              archives=$(find "$GITHUB_WORKSPACE" -path "${GITHUB_WORKSPACE}/.git" -prune -o -type f \( -name '*.jar' -o -name '*.war' -o -name '*.ear' -o -name '*.par' \) -print 2> /dev/null | wc -l | tr -d '[:space:]') || true
               incomplete=$((walk_lines + archives))
               if [ "$walk_lines" -gt 0 ]; then
                 grep -aE 'Walk error|[[:space:]]WARN[[:space:]]' "$debug_log" | head -n 50 | cut -c1-300 | sed 's/^/  trivy: /' || true
