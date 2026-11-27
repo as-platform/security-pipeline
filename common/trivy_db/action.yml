@@ -50,12 +50,12 @@ runs:
         if ! command -v trivy > /dev/null; then
           echo "::warning::trivy is not installed on the runner, there is no Trivy DB from ${SOURCE}"
         else
-          echo "host trivy: $(trivy --version | head -n 1)"
+          echo "host trivy: $(cd "$sp_dir" && trivy --config "$config" --version | head -n 1)"
           (cd "$sp_dir" && timeout 120 trivy image --config "$config" --download-db-only --cache-dir "$cache" "${repository_args[@]}" > /dev/null 2> "$stderr") || rc=$?
           elapsed=$((SECONDS - start))
           metadata="${cache}/db/metadata.json"
           if [ "$rc" -ne 0 ]; then
-            tr '\r' '\n' < "$stderr" | grep -v ' p/s ' | tail -n 20 || true
+            tr '\r' '\n' < "$stderr" | grep -v ' p/s ' | tail -n 20 | sed 's/^/  trivy: /' || true
             echo "::warning::the Trivy DB download from ${SOURCE} failed: exit code ${rc}, db_seconds=${elapsed}"
           elif [ ! -s "${cache}/db/trivy.db" ] || ! jq -e '.Version == 2' "$metadata" > /dev/null 2>&1; then
             echo "::warning::the Trivy DB from ${SOURCE} is not usable: trivy.db is missing or empty, or metadata.json is not schema version 2, db_seconds=${elapsed}"
@@ -63,7 +63,9 @@ runs:
             db_dir="$cache"
             db_source="$SOURCE"
             size_kib=$(du -sk "$cache" | cut -f1)
-            updated_at=$(jq -r '.UpdatedAt // "unknown"' "$metadata")
+            updated_at=$(jq -r '.UpdatedAt // ""' "$metadata")
+            timestamp='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z$'
+            [[ "$updated_at" =~ $timestamp ]] || updated_at=invalid
             echo "Trivy DB: db_source=${db_source} db_seconds=${elapsed} db_size_kib=${size_kib} updated_at=${updated_at} db_dir=${db_dir}"
           fi
         fi
