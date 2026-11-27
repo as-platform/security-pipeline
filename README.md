@@ -2,19 +2,20 @@
 
 🇷🇺 [Русская версия](README_RUS.md)
 
-Reusable GitHub Actions workflow that scans a repository for secrets and IaC misconfigurations with gitleaks, kics and checkov.
+Reusable GitHub Actions workflow that scans a repository for secrets, IaC misconfigurations and vulnerable dependencies with gitleaks, kics, checkov and trivy.
 
 The scanners run from signed images in Zot, on the `["self-hosted","homelab"]` runner, without docker. By default they only report: the job stays green until you ask it to fail.
 
 ## What it runs
 
-| Tool       | Finds                                         | Gate counts                               |
-| ---------- | --------------------------------------------- | ----------------------------------------- |
-| `gitleaks` | secrets in the working tree (not in history)  | every finding                             |
-| `kics`     | IaC misconfigurations                         | findings at or above `severity-threshold` |
-| `checkov`  | IaC misconfigurations                         | every failed check                        |
+| Tool       | Finds                                         | Gate counts                                         |
+| ---------- | --------------------------------------------- | --------------------------------------------------- |
+| `gitleaks` | secrets in the working tree (not in history)  | every finding                                       |
+| `kics`     | IaC misconfigurations                         | findings at or above `severity-threshold`           |
+| `checkov`  | IaC misconfigurations                         | every failed check                                  |
+| `trivy fs` | vulnerable dependencies in lockfiles (SCA)    | fixable findings at or above `severity-threshold`   |
 
-Secrets are gitleaks only: kics and checkov have secret scanning turned off.
+Secrets are gitleaks only: kics and checkov have secret scanning turned off. `trivy fs` is off by default: set `disable-trivy-fs: false` in a repository with lockfiles.
 
 ## Quick start
 
@@ -47,15 +48,16 @@ The repository needs access to the runner group and the secrets `ZOT_USER` and `
 | `timeout-minutes`                                        | `30`                         | job timeout                                                      |
 | `repository`, `ref`                                      | the calling repository       | scan another public repository                                   |
 | `artifact-name`                                          | `security-pipeline-reports`  | name of the artifact with the reports                            |
-| `severity-threshold`                                     | `HIGH`                       | `CRITICAL`, `HIGH`, `MEDIUM`, `LOW` or `INFO`; kics only         |
+| `severity-threshold`                                     | `HIGH`                       | `CRITICAL`, `HIGH`, `MEDIUM`, `LOW` or `INFO`; kics and trivy fs |
 | `disable-gitleaks`, `disable-kics`, `disable-checkov`    | `false`                      | skip a tool                                                      |
+| `disable-trivy-fs`                                       | `true`                       | `false` turns trivy fs on                                        |
 | `raise-failure`                                          | `false`                      | fail the job when a tool errors or has gated findings            |
-| `gitleaks-raise-failure`, `kics-raise-failure`, `checkov-raise-failure` | `false`        | the same for one tool                                            |
-| `image-gitleaks`, `image-kics`, `image-checkov`          | pinned                       | image pin, see [Image pins](#image-pins)                         |
+| `gitleaks-raise-failure`, `kics-raise-failure`, `checkov-raise-failure`, `trivy-fs-raise-failure` | `false` | the same for one tool                                      |
+| `image-gitleaks`, `image-kics`, `image-checkov`, `image-trivy` | pinned                 | image pin, see [Image pins](#image-pins)                         |
 
-Secrets `zot-user` and `zot-password` are required: a Zot user that can read `golden/**`.
+Secrets `zot-user` and `zot-password` are required: a Zot user that can read `golden/**` and `mirror/**`.
 
-Outputs: `results` (JSON per tool with `status` `ok`, `error` or `skipped`, `findings`, `gated`, `incomplete`, `raise`) and `verdict` (`pass` or `fail`). Read them in a later job with `fromJSON(needs.<job>.outputs.results)`.
+Outputs: `results` (JSON per tool, keys `gitleaks`, `kics`, `checkov`, `trivy_fs`, with `status` `ok`, `error` or `skipped`, `findings`, `gated`, `incomplete`, `raise`) and `verdict` (`pass` or `fail`). Read them in a later job with `fromJSON(needs.<job>.outputs.results)`.
 
 ## How the gate works
 
@@ -64,10 +66,12 @@ Outputs: `results` (JSON per tool with `status` `ok`, `error` or `skipped`, `fin
 - A broken pin, a failed `cosign verify`, pull or logout always fails the job.
 - checkov OSS has no severity, so every failed check counts. Start blocking mode with `kics-raise-failure: true`.
 - `incomplete` is how many parts a scanner could not read. It only warns.
+- `raise-failure` includes `trivy_fs` only when it is enabled. Without a lockfile `trivy_fs` is `ok` with 0 findings and a warning, so `ok` does not mean clean.
+- trivy gates a vulnerability only when it has a fix: unfixed ones are in `findings` and in the report, not in `gated`.
 
 ## Reports
 
-The artifact is kept for 7 days and has `gitleaks.json`, `kics/kics.json` and `checkov.json`. Reports are rebuilt from a list of allowed fields, so secret values and source text are dropped. File and resource names are still visible, and the artifact of a public repository can be downloaded by any signed-in GitHub user.
+The artifact is kept for 7 days and has `gitleaks.json`, `kics/kics.json`, `checkov.json` and `trivy_fs.json`. Reports are rebuilt from a list of allowed fields, so secret values and source text are dropped. File and resource names are still visible, and the artifact of a public repository can be downloaded by any signed-in GitHub user.
 
 ## Security
 
@@ -76,6 +80,7 @@ The artifact is kept for 7 days and has `gitleaks.json`, `kics/kics.json` and `c
 - A scanner sees the workspace read-only and its own output directory, nothing else.
 - `.checkov.yaml` and `kics.config` of the scanned repository are ignored: they can run code or swap the queries. `.gitleaks.toml` is honoured.
 - Inline suppressions (`#checkov:skip`, `# kics-scan ignore-line`, `gitleaks:allow`) work, so review them like code.
+- `trivy fs` scans offline: the DB is downloaded on the host before the logout from the Zot mirror, or from the public registry when the mirror fails. The DB signature is not checked. `trivy.yaml` of the scanned repository is ignored, its `.trivyignore` is honoured and hides findings silently, so put it under CODEOWNERS.
 - Scanning a repository you do not control through `repository` is best effort: the scanners still parse its files.
 
 ## Image pins
@@ -85,7 +90,9 @@ The defaults are `zot.homelab/golden/<tool>:<date>-<sha>@sha256:<digest>` in `.g
 ## Limitations
 
 - gitleaks scans the working tree only. For the history use [`ci-templates/security.yml`](https://github.com/as-platform/ci-templates), and call one of the two workflows in a repository, not both.
-- There is no network isolation, only scanner flags keep them offline.
+- There is no network isolation, only scanner flags keep them offline; `trivy fs` runs without a network.
+- `trivy fs` does not read JAR, WAR and EAR files and reads `pom.xml` without its parent and BOM, so those parts count as `incomplete`.
+- `ci-templates/security.yml` also runs `trivy fs` (vulnerabilities, secrets, misconfigurations): call one of the two workflows, not both.
 - Only public repositories can be scanned through `repository`. A monorepo sub directory cannot be scanned alone.
 - The Zot user can also write to Zot: connect only repositories you trust.
 
