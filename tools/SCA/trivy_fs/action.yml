@@ -59,7 +59,7 @@ runs:
         if [ -f "$tree_ignore" ] && [ ! -L "$tree_ignore" ]; then
           ignorefile="$tree_ignore"
           echo ".trivyignore of the scanned repository is honoured, it hides:"
-          grep -v '^[[:space:]]*$' "$tree_ignore" | head -n 100 | cut -c1-200 | sed 's/^/  trivyignore: /' || true
+          grep -v '^[[:space:]]*$' "$tree_ignore" | head -n 100 | cut -c1-200 | sed -e 's/#\{2,\}\[/#[/g' -e 's/^/  trivyignore: /' || true
         elif [ -e "$tree_ignore" ] || [ -L "$tree_ignore" ]; then
           echo "::warning::.trivyignore of the scanned repository is not a regular file and is ignored"
         fi
@@ -72,7 +72,7 @@ runs:
             --scanners vuln --debug --format json --output "$2" --exit-code 0 --ignorefile "$3" "$1" > /dev/null
         }
         show_fatal() {
-          grep -aE '[[:space:]]FATAL[[:space:]]' "$debug_log" | tail -n 5 | cut -c1-300 | sed 's/^/  trivy: /' || true
+          grep -aE '[[:space:]]FATAL[[:space:]]' "$debug_log" | tail -n 5 | cut -c1-300 | sed -e 's/#\{2,\}\[/#[/g' -e 's/^/  trivy: /' || true
         }
 
         status=error
@@ -137,7 +137,7 @@ runs:
               archives=$(find "$GITHUB_WORKSPACE" -path "${GITHUB_WORKSPACE}/.git" -prune -o -type f \( -name '*.jar' -o -name '*.war' -o -name '*.ear' -o -name '*.par' \) -print 2> /dev/null | wc -l | tr -d '[:space:]') || true
               incomplete=$((walk_lines + archives))
               if [ "$walk_lines" -gt 0 ]; then
-                grep -aE 'Walk error|[[:space:]]WARN[[:space:]]' "$debug_log" | head -n 50 | cut -c1-300 | sed 's/^/  trivy: /' || true
+                grep -aE 'Walk error|[[:space:]]WARN[[:space:]]' "$debug_log" | head -n 50 | cut -c1-300 | sed -e 's/#\{2,\}\[/#[/g' -e 's/^/  trivy: /' || true
               fi
               if [ "$incomplete" -gt 0 ]; then
                 echo "::warning::trivy_fs scan incomplete: ${incomplete} (Walk error and WARN lines ${walk_lines}, JAR, WAR, EAR and PAR files ${archives}, trivy fs does not read them)"
