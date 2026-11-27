@@ -24,7 +24,7 @@ on:
         type: string
         default: security-pipeline-reports
       severity-threshold:
-        description: CRITICAL, HIGH, MEDIUM, LOW or INFO, kics findings of this severity and above are gated
+        description: CRITICAL, HIGH, MEDIUM, LOW or INFO, kics findings and fixable trivy fs vulnerabilities of this severity and above are gated
         type: string
         default: HIGH
       image-gitleaks:
@@ -39,6 +39,10 @@ on:
         description: Pin of the checkov image, zot.homelab/golden/checkov:<YYYYMMDD-sha>@sha256:<digest>
         type: string
         default: zot.homelab/golden/checkov:20261118-0dcd8e4@sha256:75f39563ee79f00b6a583dcbf2c089020a7ee25c01af11ad606ac313a86d2933
+      image-trivy:
+        description: Pin of the trivy image, zot.homelab/golden/trivy:<YYYYMMDD-sha>@sha256:<digest>
+        type: string
+        default: zot.homelab/golden/trivy:20261118-0dcd8e4@sha256:a2208bb647d02762ae7fd5e904bb64cf8f0f8aa96d40bb81a925c5901d8e8a4a
       disable-gitleaks:
         description: Skip gitleaks
         type: boolean
@@ -51,6 +55,10 @@ on:
         description: Skip checkov
         type: boolean
         default: false
+      disable-trivy-fs:
+        description: Skip trivy fs (SCA), it is off by default, set false for a repository with lockfiles
+        type: boolean
+        default: true
       raise-failure:
         description: Fail the job when any enabled tool errors or has gated findings
         type: boolean
@@ -67,16 +75,20 @@ on:
         description: Fail the job when checkov errors or has failed checks
         type: boolean
         default: false
+      trivy-fs-raise-failure:
+        description: Fail the job when trivy fs errors or has gated vulnerabilities
+        type: boolean
+        default: false
     secrets:
       zot-user:
-        description: Zot user that can read golden/**
+        description: Zot user that can read golden/** and mirror/**
         required: true
       zot-password:
         description: Password of the Zot user
         required: true
     outputs:
       results:
-        description: Compact JSON object per tool with status (ok, error, skipped), findings, gated, incomplete and raise
+        description: Compact JSON object per tool (gitleaks, kics, checkov, trivy_fs) with status (ok, error, skipped), findings, gated, incomplete and raise
         value: ${{ jobs.security-pipeline.outputs.results }}
       verdict:
         description: fail when at least one tool tripped the gate or the job failed before the gate, otherwise pass
@@ -136,6 +148,20 @@ jobs:
         with:
           image: ${{ inputs.image-checkov }}
 
+      - name: Image trivy
+        id: image-trivy
+        if: ${{ !inputs.disable-trivy-fs }}
+        uses: as-platform/security-pipeline/common/image@main
+        with:
+          image: ${{ inputs.image-trivy }}
+
+      - name: Trivy DB (zot)
+        id: trivy-db-zot
+        if: ${{ !inputs.disable-trivy-fs }}
+        uses: as-platform/security-pipeline/common/trivy_db@main
+        with:
+          source: zot
+
       - name: Zot logout
         id: logout
         if: ${{ always() }}
@@ -160,6 +186,22 @@ jobs:
         with:
           container-id: ${{ steps.image-checkov.outputs.container-id }}
 
+      - name: Trivy DB (public)
+        id: trivy-db-public
+        if: ${{ !cancelled() && !inputs.disable-trivy-fs && steps.logout.outcome == 'success' && steps.image-trivy.outcome == 'success' && steps.trivy-db-zot.outputs.db-dir == '' }}
+        uses: as-platform/security-pipeline/common/trivy_db@main
+        with:
+          source: public
+
+      - name: Trivy fs
+        if: ${{ !cancelled() && !inputs.disable-trivy-fs && steps.logout.outcome == 'success' }}
+        uses: as-platform/security-pipeline/tools/SCA/trivy_fs@main
+        with:
+          container-id: ${{ steps.image-trivy.outputs.container-id }}
+          db-dir: ${{ steps.trivy-db-zot.outputs.db-dir || steps.trivy-db-public.outputs.db-dir }}
+          db-source: ${{ steps.trivy-db-zot.outputs.db-source || steps.trivy-db-public.outputs.db-source }}
+          severity-threshold: ${{ inputs.severity-threshold }}
+
       - name: Quality gate
         id: gate
         if: ${{ always() }}
@@ -169,10 +211,12 @@ jobs:
           disable-gitleaks: ${{ inputs.disable-gitleaks }}
           disable-kics: ${{ inputs.disable-kics }}
           disable-checkov: ${{ inputs.disable-checkov }}
+          disable-trivy-fs: ${{ inputs.disable-trivy-fs }}
           raise-failure: ${{ inputs.raise-failure }}
           gitleaks-raise-failure: ${{ inputs.gitleaks-raise-failure }}
           kics-raise-failure: ${{ inputs.kics-raise-failure }}
           checkov-raise-failure: ${{ inputs.checkov-raise-failure }}
+          trivy-fs-raise-failure: ${{ inputs.trivy-fs-raise-failure }}
           job-status: ${{ job.status }}
 
       - name: Enforce the gate
@@ -196,9 +240,17 @@ jobs:
           CONTAINER_GITLEAKS: ${{ steps.image-gitleaks.outputs.container-id }}
           CONTAINER_KICS: ${{ steps.image-kics.outputs.container-id }}
           CONTAINER_CHECKOV: ${{ steps.image-checkov.outputs.container-id }}
+          CONTAINER_TRIVY: ${{ steps.image-trivy.outputs.container-id }}
         run: |
-          for container in "$CONTAINER_GITLEAKS" "$CONTAINER_KICS" "$CONTAINER_CHECKOV"; do
+          for container in "$CONTAINER_GITLEAKS" "$CONTAINER_KICS" "$CONTAINER_CHECKOV" "$CONTAINER_TRIVY"; do
             if [ -n "$container" ] && ! buildah rm "$container" > /dev/null; then
               echo "::warning::could not remove the container ${container}"
             fi
           done
+
+      - name: Remove the Trivy DB
+        if: ${{ always() }}
+        run: |
+          if [ -n "${SP_DIR:-}" ]; then
+            rm -rf "${SP_DIR}/trivy-cache"
+          fi
