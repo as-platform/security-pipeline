@@ -1,0 +1,78 @@
+name: trivy_db
+description: Download the Trivy vulnerability DB on the runner host into $SP_DIR/trivy-cache from the Zot mirror or from the public registries and check it, never fails the job
+
+inputs:
+  source:
+    description: zot (mirror in Zot, needs the Zot credentials) or public (the default registries of trivy, run it after the logout)
+    required: true
+
+outputs:
+  db-dir:
+    description: Trivy cache directory that holds db/trivy.db, empty when the DB could not be downloaded or did not pass the check
+    value: ${{ steps.db.outputs.db-dir }}
+  db-source:
+    description: zot or public, empty when there is no usable DB
+    value: ${{ steps.db.outputs.db-source }}
+
+runs:
+  using: composite
+  steps:
+    - name: Trivy DB
+      id: db
+      shell: bash
+      env:
+        SOURCE: ${{ inputs.source }}
+      run: |
+        set -euo pipefail
+
+        case "$SOURCE" in
+          zot) repository_args=(--db-repository zot.homelab/mirror/aquasecurity/trivy-db:2) ;;
+          public) repository_args=() ;;
+          *)
+            echo "::error::source must be zot or public, got ${SOURCE@Q}"
+            exit 1
+            ;;
+        esac
+
+        sp_dir="${SP_DIR:?SP_DIR is not set, common/prepare did not run}"
+        cache="${sp_dir}/trivy-cache"
+        config="${sp_dir}/trivy-db.config"
+        stderr="${sp_dir}/trivy-db.stderr"
+        rm -rf "$cache"
+        rm -f "$stderr"
+        mkdir -p "$cache"
+        : > "$config"
+
+        db_dir=""
+        db_source=""
+        rc=0
+        start=$SECONDS
+        if ! command -v trivy > /dev/null; then
+          echo "::warning::trivy is not installed on the runner, there is no Trivy DB from ${SOURCE}"
+        else
+          echo "host trivy: $(trivy --version | head -n 1)"
+          (cd "$sp_dir" && timeout 120 trivy image --config "$config" --download-db-only --cache-dir "$cache" "${repository_args[@]}" > /dev/null 2> "$stderr") || rc=$?
+          elapsed=$((SECONDS - start))
+          metadata="${cache}/db/metadata.json"
+          if [ "$rc" -ne 0 ]; then
+            tr '\r' '\n' < "$stderr" | grep -v ' p/s ' | tail -n 20 || true
+            echo "::warning::the Trivy DB download from ${SOURCE} failed: exit code ${rc}, db_seconds=${elapsed}"
+          elif [ ! -s "${cache}/db/trivy.db" ] || ! jq -e '.Version == 2' "$metadata" > /dev/null 2>&1; then
+            echo "::warning::the Trivy DB from ${SOURCE} is not usable: trivy.db is missing or empty, or metadata.json is not schema version 2, db_seconds=${elapsed}"
+          else
+            db_dir="$cache"
+            db_source="$SOURCE"
+            size_kib=$(du -sk "$cache" | cut -f1)
+            updated_at=$(jq -r '.UpdatedAt // "unknown"' "$metadata")
+            echo "Trivy DB: db_source=${db_source} db_seconds=${elapsed} db_size_kib=${size_kib} updated_at=${updated_at} db_dir=${db_dir}"
+          fi
+        fi
+        if [ -z "$db_dir" ]; then
+          rm -rf "$cache"
+        fi
+        rm -f "$stderr" "$config"
+
+        {
+          echo "db-dir=${db_dir}"
+          echo "db-source=${db_source}"
+        } >> "$GITHUB_OUTPUT"
