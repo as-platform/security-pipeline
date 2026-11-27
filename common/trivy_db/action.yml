@@ -55,7 +55,7 @@ runs:
           elapsed=$((SECONDS - start))
           metadata="${cache}/db/metadata.json"
           if [ "$rc" -ne 0 ]; then
-            tr '\r' '\n' < "$stderr" | grep -v ' p/s ' | tail -n 20 | sed 's/^/  trivy: /' || true
+            tr '\r' '\n' < "$stderr" | grep -v ' p/s ' | tail -n 20 | sed -e 's/#\{2,\}\[/#[/g' -e 's/^/  trivy: /' || true
             echo "::warning::the Trivy DB download from ${SOURCE} failed: exit code ${rc}, db_seconds=${elapsed}"
           elif [ ! -s "${cache}/db/trivy.db" ] || ! jq -e '.Version == 2' "$metadata" > /dev/null 2>&1; then
             echo "::warning::the Trivy DB from ${SOURCE} is not usable: trivy.db is missing or empty, or metadata.json is not schema version 2, db_seconds=${elapsed}"
