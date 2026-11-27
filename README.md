@@ -91,7 +91,7 @@ The defaults are `zot.homelab/golden/<tool>:<date>-<sha>@sha256:<digest>` in `.g
 ## Limitations
 
 - gitleaks scans the working tree only. For the history use [`ci-templates/security.yml`](https://github.com/as-platform/ci-templates), and call one of the two workflows in a repository, not both.
-- There is no network isolation, only scanner flags keep them offline; `trivy fs` runs without a network.
+- There is no network isolation, only scanner flags keep them offline: `trivy fs` runs with `--offline-scan` and `--skip-db-update` and reads the DB from disk. `--network none` is passed, but on the runner the container still sees the network namespace of the pod and `eth0`, so it is not an isolation.
 - `trivy fs` does not read JAR, WAR and EAR files and reads `pom.xml` without its parent and BOM, so those parts count as `incomplete`.
 - `ci-templates/security.yml` also runs `trivy fs` (vulnerabilities, secrets, misconfigurations): call one of the two workflows, not both.
 - Only public repositories can be scanned through `repository`. A monorepo sub directory cannot be scanned alone.
